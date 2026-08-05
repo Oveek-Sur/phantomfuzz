@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "phantomfuzz"
+version = "1.0.0"
+description = "Fast, async, feature-rich web fuzzer for authorized security testing"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "PhantomFuzz contributors" }]
+keywords = ["fuzzer", "security", "pentest", "web", "bugbounty", "ffuf"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Security",
+    "Environment :: Console",
+]
+dependencies = ["aiohttp>=3.8"]
+
+[project.urls]
+Homepage = "https://github.com/YOURNAME/phantomfuzz"
+Issues = "https://github.com/YOURNAME/phantomfuzz/issues"
+
+[project.scripts]
+phantomfuzz = "phantomfuzz.cli:run"
+
+[tool.setuptools]
+packages = ["phantomfuzz"]
