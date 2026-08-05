@@ -119,6 +119,52 @@ def build_parser():
     w.add_argument("--no-color", action="store_true")
     w.add_argument("--no-progress", action="store_true")
 
+    # ---------------- logic analyzers (idor / race / tamper) ----------------
+    def add_auth(sp):
+        sp.add_argument("-H", "--header", action="append", default=[], metavar="'K: V'")
+        sp.add_argument("-b", "--cookie", metavar="STR")
+        sp.add_argument("-k", "--insecure", action="store_true")
+        sp.add_argument("--auth-url", help="login URL to establish a session first")
+        sp.add_argument("--auth-data", help="login body, e.g. 'user=admin&pass=1234'")
+        sp.add_argument("--auth-method", default="POST")
+        sp.add_argument("--csrf", metavar="FIELD", help="CSRF field ('auto' to guess)")
+        sp.add_argument("--csrf-url")
+        sp.add_argument("--no-color", action="store_true")
+
+    # idor
+    i = sub.add_parser("idor", help="enumerate object IDs, detect unauthorized access")
+    i.add_argument("-u", "--url", required=True, help="URL with FUZZ as the object id")
+    grp = i.add_mutually_exclusive_group(required=True)
+    grp.add_argument("-w", "--wordlist", help="file of ids to try")
+    grp.add_argument("--range", metavar="LO-HI", help="numeric id range, e.g. 1-500")
+    i.add_argument("--self-id", help="an id you legitimately own (success baseline)")
+    i.add_argument("-X", "--method", default="GET")
+    i.add_argument("-d", "--data", metavar="STR", help="body (may contain FUZZ)")
+    i.add_argument("-t", "--threads", type=int, default=20)
+    i.add_argument("--threshold", type=float, default=0.90)
+    i.add_argument("-o", "--output", metavar="FILE")
+    add_auth(i)
+
+    # race
+    ra = sub.add_parser("race", help="race-condition tester (synchronized burst)")
+    ra.add_argument("-u", "--url", required=True)
+    ra.add_argument("-n", "--count", type=int, default=20, help="parallel requests")
+    ra.add_argument("-X", "--method", default="POST")
+    ra.add_argument("-d", "--data", metavar="STR", help="request body")
+    ra.add_argument("--success", metavar="CODES", default="200,201,302",
+                    help="status codes counted as 'success'")
+    add_auth(ra)
+
+    # tamper
+    ta = sub.add_parser("tamper", help="param/value manipulation (price, role, flags)")
+    ta.add_argument("-u", "--url", required=True, help="URL (query params are tampered)")
+    ta.add_argument("-X", "--method", default="GET")
+    ta.add_argument("-d", "--data", metavar="STR", help="body params to tamper")
+    ta.add_argument("-t", "--threads", type=int, default=15)
+    ta.add_argument("--threshold", type=float, default=0.98)
+    ta.add_argument("-o", "--output", metavar="FILE")
+    add_auth(ta)
+
     # ---------------- net ----------------
     n = sub.add_parser("net", help="network-level fuzzing (TCP scan / payload)")
     n.add_argument("--host", required=True, help="target host or IP")
@@ -303,6 +349,149 @@ def _render_seed(args):
     return path
 
 
+def _resolve_auth(args):
+    """Build (cookies, headers) from -H/-b and optional --auth-url login."""
+    headers = {"User-Agent": "PhantomFuzz/%s" % __version__}
+    for h in getattr(args, "header", []) or []:
+        if ":" in h:
+            k, _, v = h.partition(":")
+            headers[k.strip()] = v.strip()
+    if getattr(args, "cookie", None):
+        headers["Cookie"] = args.cookie
+    cookies = {}
+    if getattr(args, "auth_url", None):
+        from .auth import establish_session
+        cookies, extra, _ = asyncio.run(establish_session(
+            args.auth_url, args.auth_data, method=args.auth_method,
+            csrf_field=args.csrf, csrf_url=args.csrf_url,
+            verify_ssl=not args.insecure, headers=headers))
+        headers.update(extra)
+        bits = []
+        if cookies:
+            bits.append(f"{len(cookies)} cookie(s)")
+        if "Authorization" in extra:
+            bits.append("bearer token")
+        print(f"{C.GREEN}logged in{C.RESET} -> {', '.join(bits) or 'session'}")
+    return cookies, headers
+
+
+def _run_idor(args):
+    if args.no_color:
+        C.strip()
+    from .logic import idor_scan
+    show(__version__)
+    if "FUZZ" not in args.url and not (args.data and "FUZZ" in args.data):
+        print(f"{C.RED}error:{C.RESET} put FUZZ where the object id goes.",
+              file=sys.stderr)
+        return 2
+    if args.range:
+        lo, hi = args.range.split("-", 1)
+        ids = [str(x) for x in range(int(lo), int(hi) + 1)]
+    else:
+        with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as f:
+            ids = [l.strip() for l in f if l.strip()]
+
+    cookies, headers = _resolve_auth(args)
+    base = {"url": args.url, "method": args.method.upper(),
+            "headers": headers, "body": args.data}
+
+    def prog(done, total):
+        print(f"\r{C.CYAN}testing ids{C.RESET} {done}/{total}", end="", flush=True)
+
+    findings, success, deny = asyncio.run(idor_scan(
+        base, ids, self_id=args.self_id, cookies=cookies, headers=headers,
+        verify_ssl=not args.insecure, threshold=args.threshold,
+        concurrency=args.threads, on_progress=prog))
+    print()
+    if success and not success.error:
+        print(f"{C.DIM}your object baseline: {success.status} "
+              f"{success.size}b · denied baseline: {deny.status} {deny.size}b{C.RESET}")
+    if not findings:
+        print(f"{C.YELLOW}no accessible foreign objects detected.{C.RESET}")
+        return 0
+    print(f"\n{C.BOLD}Potential IDOR — {len(findings)} accessible object(s):{C.RESET}")
+    for i, r, verdict in findings:
+        print(f"  {C.RED}id={i}{C.RESET}  [{r.status}] {r.size}b  {C.DIM}{verdict}{C.RESET}")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            for i, r, verdict in findings:
+                f.write(f"{i}\t{r.status}\t{r.size}\t{verdict}\n")
+        print(f"{C.GREEN}saved{C.RESET} -> {args.output}")
+    return 0
+
+
+def _run_race(args):
+    if args.no_color:
+        C.strip()
+    from .logic import race_test
+    show(__version__)
+    cookies, headers = _resolve_auth(args)
+    base = {"url": args.url, "method": args.method.upper(),
+            "headers": headers, "body": args.data}
+    success = {int(c) for c in args.success.split(",") if c.strip().isdigit()}
+    print(f"{C.CYAN}firing {args.count} synchronized requests{C.RESET} → {args.url}")
+    responses = asyncio.run(race_test(
+        base, n=args.count, cookies=cookies, headers=headers,
+        verify_ssl=not args.insecure))
+
+    # distribution of (status,size)
+    dist = {}
+    ok = 0
+    for r in responses:
+        key = (r.status, r.size)
+        dist[key] = dist.get(key, 0) + 1
+        if r.status in success:
+            ok += 1
+    print(f"\n{C.BOLD}Response distribution:{C.RESET}")
+    for (st, sz), cnt in sorted(dist.items()):
+        col = C.GREEN if st in success else C.DIM
+        print(f"  {col}[{st}]{C.RESET} {sz}b  ×{cnt}")
+    print(f"\n{C.BOLD}{ok}/{args.count}{C.RESET} responses were 'success' codes.")
+    if ok > 1:
+        print(f"{C.RED}⚠ multiple successes{C.RESET} — if this action should only "
+              f"succeed once, that's a likely race condition.")
+    else:
+        print(f"{C.GREEN}looks safe{C.RESET} — only one success under burst.")
+    return 0
+
+
+def _run_tamper(args):
+    if args.no_color:
+        C.strip()
+    from .logic import tamper_test
+    show(__version__)
+    cookies, headers = _resolve_auth(args)
+    base = {"url": args.url, "method": args.method.upper(),
+            "headers": headers, "body": args.data}
+
+    def prog(done, total):
+        print(f"\r{C.CYAN}tampering{C.RESET} {done}/{total}", end="", flush=True)
+
+    baseline, findings = asyncio.run(tamper_test(
+        base, cookies=cookies, headers=headers, verify_ssl=not args.insecure,
+        threshold=args.threshold, concurrency=args.threads, on_progress=prog))
+    print()
+    print(f"{C.DIM}baseline: [{baseline.status}] {baseline.size}b{C.RESET}")
+    if not findings:
+        print(f"{C.YELLOW}no parameter changed the server's behavior.{C.RESET}")
+        return 0
+    print(f"\n{C.BOLD}Behavior changes — {len(findings)} finding(s) "
+          f"(review manually):{C.RESET}")
+    for f in findings:
+        r = f["response"]
+        print(f"  {C.RED}{f['source']}:{f['key']}={f['payload']}{C.RESET} "
+              f"(was {f['original'] or '∅'})  [{r.status}] {r.size}b  "
+              f"{C.DIM}{f['why']}{C.RESET}")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            for f in findings:
+                r = f["response"]
+                fh.write(f"{f['source']}\t{f['key']}\t{f['original']}\t"
+                         f"{f['payload']}\t{r.status}\t{r.size}\t{f['why']}\n")
+        print(f"{C.GREEN}saved{C.RESET} -> {args.output}")
+    return 0
+
+
 def _run_net(args):
     if args.no_color:
         C.strip()
@@ -344,14 +533,18 @@ def _run_net(args):
 def run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
-    known = {"web", "net", "-h", "--help", "-V", "--version"}
+    known = {"web", "net", "idor", "race", "tamper",
+             "-h", "--help", "-V", "--version"}
     if argv and argv[0] not in known:
         argv = ["web"] + argv
     args = build_parser().parse_args(argv)
 
-    if args.command == "net":
-        return _run_net(args)
-    if args.command == "web":
-        return _run_web(args)
+    dispatch = {
+        "web": _run_web, "net": _run_net, "idor": _run_idor,
+        "race": _run_race, "tamper": _run_tamper,
+    }
+    handler = dispatch.get(args.command)
+    if handler:
+        return handler(args)
     build_parser().print_help()
     return 0

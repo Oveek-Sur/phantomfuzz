@@ -43,6 +43,7 @@ tackles each:
 | **3** | Blind to JS/SPA (React/Vue) routes | **`--render-discover` / `--render-seed`** — headless browser renders the app and captures real API endpoints + in-app routes |
 | **4** | False positives from soft-404 / branded error pages | **`--smart`** — learns a baseline and filters responses by *content similarity*, not just status/size |
 | **5** | Trips WAFs / rate-limiters instantly | **`--adaptive --jitter --random-agent`** — detects blocking, auto-backs-off, jitters timing, rotates User-Agents |
+| **7** | Blind to business-logic bugs (IDOR, price/param tampering, race conditions) | **`idor` / `tamper` / `race` subcommands** — differential analyzers that compare responses against a baseline to surface logic flaws automatically |
 
 ---
 
@@ -180,6 +181,34 @@ python -m phantomfuzz -u https://target.tld/FUZZ -w wl.txt \
     -t 10 --rate 20     `# cap concurrency & requests/sec`
 ```
 
+### 7. Business-logic testing (IDOR / tamper / race)
+These are **differential** analyzers: they establish a baseline, send a
+variant, and flag when the server's behavior changes in a way it shouldn't.
+They surface candidates for you to confirm — not automatic exploits.
+
+```bash
+# IDOR — enumerate object ids and detect ones you can access that aren't yours.
+# --self-id is an object you legitimately own (the "authorized" baseline).
+python -m phantomfuzz idor -u "https://target.tld/api/invoice/FUZZ" \
+    --range 1-500 --self-id 42 \
+    --auth-url https://target.tld/login --auth-data 'user=me&pass=pw'
+
+# TAMPER — mutate price/quantity/role/flags and flag responses that diverge.
+python -m phantomfuzz tamper -u "https://target.tld/cart?price=100&qty=1&role=user" \
+    --auth-url https://target.tld/login --auth-data 'user=me&pass=pw'
+python -m phantomfuzz tamper -u https://target.tld/checkout -X POST \
+    -d 'item=9&price=999&coupon=NONE' -b 'session=...'
+
+# RACE — fire N synchronized requests to reveal a race window
+# (e.g. a single-use coupon or balance withdrawal redeemed twice).
+python -m phantomfuzz race -u https://target.tld/redeem -X POST \
+    -d 'code=FREEBIE' -n 30 -b 'session=...'
+```
+
+> ⚠️ These probe *behavior* and can change server state (place orders, spend
+> credits, mutate records). Run them **only** against your own test
+> environment, and expect to verify findings by hand in Burp Repeater.
+
 ---
 
 ## 🎛️ Options reference
@@ -246,6 +275,16 @@ python -m phantomfuzz -u https://target.tld/FUZZ -w wl.txt \
 | `--match STR` | only show replies containing STR |
 | `-w` | payload list for `--send` |
 | `--no-banner` | skip banner grabbing |
+
+### Logic subcommands (`idor` / `race` / `tamper`)
+All three accept the auth flags (`-H`, `-b`, `-k`, `--auth-url`, `--auth-data`,
+`--csrf`, …) so they can run against authenticated endpoints.
+
+| Subcommand | Key flags | Purpose |
+|------------|-----------|---------|
+| `idor` | `-u .../FUZZ`, `-w ids` or `--range LO-HI`, `--self-id`, `--threshold` | detect access to objects that aren't yours |
+| `race` | `-u`, `-n COUNT`, `-X`, `-d`, `--success CODES` | synchronized burst to reveal race windows |
+| `tamper` | `-u` (query) / `-d` (body), `--threshold` | mutate price/qty/role/flags, flag behavior changes |
 
 ### Matchers (show if matches)
 `-mc` codes · `-ms` sizes · `-mw` words · `-ml` lines · `-mr` regex · `-mt` slower-than-ms
