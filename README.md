@@ -31,6 +31,19 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 💾 **Export** | JSON, CSV, HTML report, or plain text |
 | 📊 **Live UI** | colored results + progress bar, ETA, req/s |
 
+### 🚀 Beyond ffuf — the five limitations, solved
+
+Classic HTTP fuzzers (ffuf/wfuzz) hit five well-known walls. PhantomFuzz
+tackles each:
+
+| # | ffuf limitation | PhantomFuzz answer |
+|---|-----------------|--------------------|
+| **1** | HTTP-only, can't touch SSH/FTP/DB ports | **`net` subcommand** — async TCP port scan, banner grab & raw-payload fuzzing |
+| **2** | Stateless; you paste cookies by hand | **`--auth-url`** — runs the login flow, auto-extracts CSRF, captures session cookies & bearer tokens, reuses them |
+| **3** | Blind to JS/SPA (React/Vue) routes | **`--render-discover` / `--render-seed`** — headless browser renders the app and captures real API endpoints + in-app routes |
+| **4** | False positives from soft-404 / branded error pages | **`--smart`** — learns a baseline and filters responses by *content similarity*, not just status/size |
+| **5** | Trips WAFs / rate-limiters instantly | **`--adaptive --jitter --random-agent`** — detects blocking, auto-backs-off, jitters timing, rotates User-Agents |
+
 ---
 
 ## 📦 Installation
@@ -114,6 +127,61 @@ python -m phantomfuzz -u https://target.tld/ \
 
 ---
 
+## 🧨 Advanced: beyond plain HTTP fuzzing
+
+### 1. Network-level fuzzing (`net`)
+```bash
+# TCP port scan + service/banner detection
+python -m phantomfuzz net --host 10.0.0.5 -p 1-1024
+
+# raw payload fuzzing against one port (e.g. probe a Redis/custom TCP service)
+python -m phantomfuzz net --host db.local -p 6379 -w commands.txt \
+    --send 'FUZZ\r\n' --match "OK"
+```
+
+### 2. Authenticated fuzzing — automatic login
+```bash
+# form login with auto CSRF extraction, then fuzz the members area
+python -m phantomfuzz -u https://target.tld/app/FUZZ -w wl.txt \
+    --auth-url https://target.tld/login \
+    --auth-data 'username=admin&password=Passw0rd' \
+    --csrf auto            # auto-detects csrf_token / _token / authenticity_token …
+
+# JSON API login → bearer token captured and sent as Authorization header
+python -m phantomfuzz -u https://target.tld/api/FUZZ -w wl.txt \
+    --auth-url https://target.tld/api/login \
+    --auth-data 'email=me@x.com&password=secret'
+```
+
+### 3. JavaScript / SPA discovery (needs Playwright)
+```bash
+pip install playwright && playwright install chromium
+
+# render the app, print the real API endpoints + client-side routes
+python -m phantomfuzz -u https://spa.target.tld/ --render-discover -o endpoints.txt
+
+# render first, then fuzz using the discovered path segments as the wordlist
+python -m phantomfuzz -u https://spa.target.tld/FUZZ --render-seed
+```
+
+### 4. Kill false positives (soft-404 / branded error pages)
+```bash
+# --smart learns a baseline from random paths and filters look-alikes by
+# content similarity — catches 200-status "not found" pages ffuf shows as hits
+python -m phantomfuzz -u https://target.tld/FUZZ -w wl.txt --smart --smart-threshold 0.9
+```
+
+### 5. Stay under WAFs / rate limiters
+```bash
+python -m phantomfuzz -u https://target.tld/FUZZ -w wl.txt \
+    --adaptive          `# auto-slow-down when 403/429/503 or WAF pages appear` \
+    --jitter 0.4        `# random 0–0.4s per request` \
+    --random-agent      `# rotate real browser User-Agents` \
+    -t 10 --rate 20     `# cap concurrency & requests/sec`
+```
+
+---
+
 ## 🎛️ Options reference
 
 ### Target & payloads
@@ -133,17 +201,51 @@ python -m phantomfuzz -u https://target.tld/ \
 | `-b, --cookie` | Cookie header value |
 | `-d, --data` | request body (may contain `FUZZ`) |
 
-### Performance
+### Performance & evasion
 | Flag | Description |
 |------|-------------|
 | `-t, --threads` | concurrency (default 40) |
 | `--timeout` | per-request timeout (s) |
 | `--retries` | retries on error |
 | `--delay` | fixed delay per request (s) |
+| `--jitter` | random 0..N s extra delay per request |
 | `--rate` | max requests/sec (0 = unlimited) |
+| `--random-agent` | rotate real-browser User-Agent strings |
+| `--adaptive` | auto back-off when a WAF/rate-limit is detected |
 | `--proxy` | proxy URL |
 | `-k, --insecure` | skip TLS verification |
 | `-L, --follow` | follow redirects |
+
+### Authentication (session handling)
+| Flag | Description |
+|------|-------------|
+| `--auth-url` | login URL — establishes a session before fuzzing |
+| `--auth-data` | login body, e.g. `'user=admin&pass=1234'` |
+| `--auth-method` | login method (default POST) |
+| `--csrf FIELD` | CSRF field name to auto-extract (`auto` to guess) |
+| `--csrf-url` | page to read the CSRF token from |
+
+### JS / SPA (needs `pip install playwright`)
+| Flag | Description |
+|------|-------------|
+| `--render-discover` | render target, print API endpoints + routes, exit |
+| `--render-seed` | render target, use discovered segments as wordlist |
+
+### Smart filtering
+| Flag | Description |
+|------|-------------|
+| `--smart` | content-similarity soft-404 / false-positive filter |
+| `--smart-threshold` | similarity cutoff 0–1 (default 0.90) |
+
+### Network subcommand (`phantomfuzz net`)
+| Flag | Description |
+|------|-------------|
+| `--host` | target host or IP |
+| `-p, --ports` | `22,80,443` or `1-1024` |
+| `--send TEMPLATE` | raw payload with `FUZZ`, sent to a single port |
+| `--match STR` | only show replies containing STR |
+| `-w` | payload list for `--send` |
+| `--no-banner` | skip banner grabbing |
 
 ### Matchers (show if matches)
 `-mc` codes · `-ms` sizes · `-mw` words · `-ml` lines · `-mr` regex · `-mt` slower-than-ms

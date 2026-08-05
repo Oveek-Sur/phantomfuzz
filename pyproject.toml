@@ -19,6 +19,10 @@ classifiers = [
 ]
 dependencies = ["aiohttp>=3.8"]
 
+[project.optional-dependencies]
+# JS/SPA rendering (limitation #3). After install run: playwright install chromium
+render = ["playwright>=1.40"]
+
 [project.urls]
 Homepage = "https://github.com/YOURNAME/phantomfuzz"
 Issues = "https://github.com/YOURNAME/phantomfuzz/issues"

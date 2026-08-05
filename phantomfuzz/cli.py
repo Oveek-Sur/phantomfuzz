@@ -1,4 +1,11 @@
-"""Command-line interface for PhantomFuzz."""
+"""Command-line interface for PhantomFuzz.
+
+Subcommands:
+  web   HTTP/HTTPS fuzzing (default)  -- directories, params, headers, body
+  net   network-level fuzzing         -- TCP port scan, banner grab, payload fuzz
+
+If no subcommand is given, 'web' is assumed (backward compatible).
+"""
 
 import argparse
 import asyncio
@@ -12,31 +19,23 @@ from .http_client import HAVE_AIOHTTP, AsyncFetcher
 from .output import Printer, export
 from .wordlist import WordlistSet
 
-EPILOG = f"""{C.BOLD}examples:{C.RESET}
-  # directory discovery
-  phantomfuzz -u https://site.com/FUZZ -w wordlist.txt
+EPILOG = f"""{C.BOLD}web examples:{C.RESET}
+  phantomfuzz -u https://site.com/FUZZ -w wl.txt -mc 200,301,403 -ac
+  phantomfuzz -u https://site.com/FUZZ -w wl.txt --smart --adaptive --random-agent
+  phantomfuzz -u https://site.com/app/FUZZ -w wl.txt \\
+              --auth-url https://site.com/login --auth-data 'user=admin&pass=1234' --csrf auto
+  phantomfuzz -u https://spa.com/FUZZ -w wl.txt --render-seed   # discover SPA routes first
 
-  # only show 200/301/403, hide 404-sized junk, save JSON
-  phantomfuzz -u https://site.com/FUZZ -w wl.txt -mc 200,301,403 -o out.json -of json
-
-  # two wordlists, clusterbomb (every combo), with recursion
-  phantomfuzz -u https://site.com/FUZZ/FUZ2Z -w dirs.txt:FUZZ -w files.txt:FUZ2Z -r -rd 2
-
-  # POST body fuzzing with custom header
-  phantomfuzz -u https://site.com/login -X POST -d 'user=admin&pass=FUZZ' \\
-              -w passwords.txt -H 'Content-Type: application/x-www-form-urlencoded'
-
-  # auto-calibrate away wildcard responses, add extensions
-  phantomfuzz -u https://site.com/FUZZ -w wl.txt -ac -e .php,.bak,.old
+{C.BOLD}net examples:{C.RESET}
+  phantomfuzz net --host 10.0.0.5 -p 1-1024            # TCP port scan + banners
+  phantomfuzz net --host db.local -p 6379 -w cmds.txt --send 'FUZZ\\r\\n'
 
 {C.YELLOW}Use only on assets you own or are explicitly authorized to test.{C.RESET}
 """
 
 
 def parse_wordlist_spec(value):
-    """Parse 'path' or 'path:KEYWORD' into (path, keyword)."""
-    if ":" in value and not value[1:3] == ":\\":  # avoid splitting Windows drive
-        # split on the LAST colon that isn't a drive letter
+    if ":" in value and not value[1:3] == ":\\":
         path, _, kw = value.rpartition(":")
         if path and kw and "/" not in kw and "\\" not in kw:
             return path, kw
@@ -46,98 +45,115 @@ def parse_wordlist_spec(value):
 def build_parser():
     p = argparse.ArgumentParser(
         prog="phantomfuzz",
-        description="PhantomFuzz - fast async web fuzzer.",
-        epilog=EPILOG,
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-    # target
-    p.add_argument("-u", "--url", required=True,
-                   help="target URL with FUZZ keyword(s)")
-    p.add_argument("-w", "--wordlist", action="append", required=True,
-                   metavar="FILE[:KEYWORD]",
-                   help="wordlist; repeatable. 'file.txt:FUZ2Z' names the keyword")
-    p.add_argument("-m", "--mode", default="clusterbomb",
-                   choices=["sniper", "clusterbomb", "pitchfork"],
-                   help="multi-wordlist attack mode (default: clusterbomb)")
-    p.add_argument("-e", "--extensions", metavar="LIST",
-                   help="append extensions, e.g. .php,.bak,.old")
-    p.add_argument("--mutations", metavar="LIST",
-                   help="payload mutations: urlencode,upper,lower,capitalize,double,reverse")
-
-    # request shaping
-    p.add_argument("-X", "--method", default="GET", help="HTTP method")
-    p.add_argument("-H", "--header", action="append", default=[],
-                   metavar="'K: V'", help="custom header; repeatable")
-    p.add_argument("-b", "--cookie", metavar="STR", help="Cookie header value")
-    p.add_argument("-d", "--data", metavar="STR", help="request body (may contain FUZZ)")
-    p.add_argument("--user-agent", default="PhantomFuzz/%s" % __version__)
-
-    # performance
-    p.add_argument("-t", "--threads", type=int, default=40,
-                   help="concurrency (default: 40)")
-    p.add_argument("--timeout", type=float, default=10, help="per-request timeout (s)")
-    p.add_argument("--retries", type=int, default=1, help="retries on error")
-    p.add_argument("--delay", type=float, default=0.0, help="fixed delay per request (s)")
-    p.add_argument("--rate", type=int, default=0, help="max requests/sec (0=unlimited)")
-    p.add_argument("--proxy", help="proxy URL, e.g. http://127.0.0.1:8080")
-    p.add_argument("-k", "--insecure", action="store_true", help="skip TLS verify")
-    p.add_argument("-L", "--follow", action="store_true", help="follow redirects")
-
-    # matchers
-    p.add_argument("-mc", metavar="CODES", help="match status codes, e.g. 200,301-399")
-    p.add_argument("-ms", metavar="SIZES", help="match response sizes")
-    p.add_argument("-mw", metavar="N", help="match word counts")
-    p.add_argument("-ml", metavar="N", help="match line counts")
-    p.add_argument("-mr", metavar="REGEX", help="match body regex")
-    p.add_argument("-mt", metavar="MS", type=float, help="match responses slower than MS ms")
-    # filters
-    p.add_argument("-fc", metavar="CODES", help="filter (hide) status codes")
-    p.add_argument("-fs", metavar="SIZES", help="filter response sizes")
-    p.add_argument("-fw", metavar="N", help="filter word counts")
-    p.add_argument("-fl", metavar="N", help="filter line counts")
-    p.add_argument("-fr", metavar="REGEX", help="filter body regex")
-    p.add_argument("-ac", "--auto-calibrate", action="store_true",
-                   help="auto-detect and filter wildcard/catch-all responses")
-
-    # recursion & control
-    p.add_argument("-r", "--recursion", action="store_true", help="recurse into dirs")
-    p.add_argument("-rd", "--recursion-depth", type=int, default=1,
-                   help="max recursion depth (default: 1)")
-    p.add_argument("--maxhits", type=int, default=0,
-                   help="stop after N matches (0=unlimited)")
-
-    # output
-    p.add_argument("-o", "--output", metavar="FILE", help="write results to file")
-    p.add_argument("-of", "--output-format", default="json",
-                   choices=["json", "csv", "html", "plain"],
-                   help="output format (default: json)")
-    p.add_argument("-s", "--silent", action="store_true", help="quiet: results only")
-    p.add_argument("-v", "--verbose", action="store_true", help="show url + timing")
-    p.add_argument("--no-color", action="store_true", help="disable colors")
-    p.add_argument("--no-progress", action="store_true", help="disable progress bar")
+        description="PhantomFuzz - fast async web + network fuzzer.",
+        epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("-V", "--version", action="version",
                    version="PhantomFuzz %s" % __version__)
+    sub = p.add_subparsers(dest="command")
+
+    # ---------------- web ----------------
+    w = sub.add_parser("web", help="HTTP/HTTPS fuzzing (default)",
+                       formatter_class=argparse.RawDescriptionHelpFormatter,
+                       epilog=EPILOG)
+    w.add_argument("-u", "--url", required=True, help="target URL with FUZZ keyword(s)")
+    w.add_argument("-w", "--wordlist", action="append", required=True,
+                   metavar="FILE[:KEYWORD]", help="wordlist; repeatable")
+    w.add_argument("-m", "--mode", default="clusterbomb",
+                   choices=["sniper", "clusterbomb", "pitchfork"])
+    w.add_argument("-e", "--extensions", metavar="LIST", help=".php,.bak,.old")
+    w.add_argument("--mutations", metavar="LIST",
+                   help="urlencode,upper,lower,capitalize,double,reverse")
+    # request shaping
+    w.add_argument("-X", "--method", default="GET")
+    w.add_argument("-H", "--header", action="append", default=[], metavar="'K: V'")
+    w.add_argument("-b", "--cookie", metavar="STR")
+    w.add_argument("-d", "--data", metavar="STR", help="body (may contain FUZZ)")
+    w.add_argument("--user-agent", default="PhantomFuzz/%s" % __version__)
+    # performance / evasion
+    w.add_argument("-t", "--threads", type=int, default=40)
+    w.add_argument("--timeout", type=float, default=10)
+    w.add_argument("--retries", type=int, default=1)
+    w.add_argument("--delay", type=float, default=0.0, help="fixed delay per request (s)")
+    w.add_argument("--jitter", type=float, default=0.0, help="random 0..N s extra delay")
+    w.add_argument("--rate", type=int, default=0, help="max requests/sec (0=unlimited)")
+    w.add_argument("--random-agent", action="store_true", help="rotate User-Agent")
+    w.add_argument("--adaptive", action="store_true",
+                   help="auto back-off when WAF/rate-limit is detected")
+    w.add_argument("--proxy")
+    w.add_argument("-k", "--insecure", action="store_true")
+    w.add_argument("-L", "--follow", action="store_true")
+    # matchers
+    w.add_argument("-mc", metavar="CODES"); w.add_argument("-ms", metavar="SIZES")
+    w.add_argument("-mw", metavar="N"); w.add_argument("-ml", metavar="N")
+    w.add_argument("-mr", metavar="REGEX"); w.add_argument("-mt", metavar="MS", type=float)
+    # filters
+    w.add_argument("-fc", metavar="CODES"); w.add_argument("-fs", metavar="SIZES")
+    w.add_argument("-fw", metavar="N"); w.add_argument("-fl", metavar="N")
+    w.add_argument("-fr", metavar="REGEX")
+    w.add_argument("-ac", "--auto-calibrate", action="store_true",
+                   help="filter wildcard/catch-all responses")
+    w.add_argument("--smart", action="store_true",
+                   help="content-similarity soft-404 / false-positive filter")
+    w.add_argument("--smart-threshold", type=float, default=0.90)
+    # auth (session handling)
+    w.add_argument("--auth-url", help="login URL to establish a session first")
+    w.add_argument("--auth-data", help="login body, e.g. 'user=admin&pass=1234'")
+    w.add_argument("--auth-method", default="POST")
+    w.add_argument("--csrf", metavar="FIELD",
+                   help="CSRF field name to auto-extract ('auto' to guess)")
+    w.add_argument("--csrf-url", help="page to fetch the CSRF token from")
+    # JS rendering
+    w.add_argument("--render-discover", action="store_true",
+                   help="render target in a browser and print SPA routes/API endpoints")
+    w.add_argument("--render-seed", action="store_true",
+                   help="render target, then use discovered path segments as the wordlist")
+    # recursion & output
+    w.add_argument("-r", "--recursion", action="store_true")
+    w.add_argument("-rd", "--recursion-depth", type=int, default=1)
+    w.add_argument("--maxhits", type=int, default=0)
+    w.add_argument("-o", "--output", metavar="FILE")
+    w.add_argument("-of", "--output-format", default="json",
+                   choices=["json", "csv", "html", "plain"])
+    w.add_argument("-s", "--silent", action="store_true")
+    w.add_argument("-v", "--verbose", action="store_true")
+    w.add_argument("--no-color", action="store_true")
+    w.add_argument("--no-progress", action="store_true")
+
+    # ---------------- net ----------------
+    n = sub.add_parser("net", help="network-level fuzzing (TCP scan / payload)")
+    n.add_argument("--host", required=True, help="target host or IP")
+    n.add_argument("-p", "--ports", default="1-1024",
+                   help="ports: '22,80,443' or '1-1024'")
+    n.add_argument("-w", "--wordlist", help="payload list for --send fuzzing")
+    n.add_argument("--send", metavar="TEMPLATE",
+                   help="raw payload template with FUZZ, sent to a single port")
+    n.add_argument("--match", metavar="STR", help="only show replies containing STR")
+    n.add_argument("-t", "--threads", type=int, default=200)
+    n.add_argument("--timeout", type=float, default=3.0)
+    n.add_argument("--no-banner", action="store_true", help="skip banner grabbing")
+    n.add_argument("--no-color", action="store_true")
     return p
 
 
-def run(argv=None):
-    args = build_parser().parse_args(argv)
+# --------------------------------------------------------------------------- #
 
+def _run_web(args):
     if args.no_color or (args.output and not sys.stdout.isatty()):
         C.strip()
     show(__version__, quiet=args.silent)
 
     if not HAVE_AIOHTTP:
-        print(f"{C.RED}error:{C.RESET} aiohttp is required. Install with:  "
-              f"pip install aiohttp", file=sys.stderr)
+        print(f"{C.RED}error:{C.RESET} pip install aiohttp", file=sys.stderr)
         return 2
+
+    # optional: render-discover just prints endpoints and exits
+    if args.render_discover:
+        return _render_discover(args)
 
     if "FUZZ" not in args.url and not args.data:
-        print(f"{C.RED}error:{C.RESET} no FUZZ keyword found in URL or body.",
-              file=sys.stderr)
+        print(f"{C.RED}error:{C.RESET} no FUZZ keyword in URL or body.", file=sys.stderr)
         return 2
 
-    # headers
     headers = {"User-Agent": args.user_agent}
     for h in args.header:
         if ":" in h:
@@ -146,15 +162,41 @@ def run(argv=None):
     if args.cookie:
         headers["Cookie"] = args.cookie
 
+    cookies = {}
+    # ---- limitation #2: establish a session via login flow ----
+    if args.auth_url:
+        from .auth import establish_session
+        try:
+            cookies, extra, _ = asyncio.run(establish_session(
+                args.auth_url, args.auth_data, method=args.auth_method,
+                csrf_field=args.csrf, csrf_url=args.csrf_url,
+                verify_ssl=not args.insecure, headers=headers))
+        except Exception as e:  # noqa: BLE001
+            print(f"{C.RED}auth failed:{C.RESET} {e}", file=sys.stderr)
+            return 2
+        headers.update(extra)
+        if not args.silent:
+            bits = []
+            if cookies:
+                bits.append(f"{len(cookies)} cookie(s)")
+            if "Authorization" in extra:
+                bits.append("bearer token")
+            print(f"{C.GREEN}logged in{C.RESET} -> captured "
+                  f"{', '.join(bits) or 'session'}")
+
     base_request = {
-        "url": args.url,
-        "method": args.method.upper(),
-        "headers": headers,
-        "body": args.data,
+        "url": args.url, "method": args.method.upper(),
+        "headers": headers, "body": args.data,
     }
 
-    # wordlists
-    specs = [parse_wordlist_spec(w) for w in args.wordlist]
+    # ---- wordlist (optionally seeded from a rendered SPA) ----
+    if args.render_seed:
+        seed_path = _render_seed(args)
+        if not seed_path:
+            return 2
+        args.wordlist = [seed_path]
+
+    specs = [parse_wordlist_spec(x) for x in args.wordlist]
     mode = "sniper" if len(specs) == 1 else args.mode
     exts = [e.strip() for e in args.extensions.split(",")] if args.extensions else None
     try:
@@ -162,12 +204,10 @@ def run(argv=None):
     except FileNotFoundError as e:
         print(f"{C.RED}error:{C.RESET} {e}", file=sys.stderr)
         return 2
-
     if wordset.total() == 0:
         print(f"{C.RED}error:{C.RESET} wordlist is empty.", file=sys.stderr)
         return 2
 
-    # filters / matchers
     matcher = Rule(status=args.mc, size=args.ms, words=args.mw,
                    lines=args.ml, regex=args.mr, time_ms=args.mt)
     filt = Rule(status=args.fc, size=args.fs, words=args.fw,
@@ -177,7 +217,8 @@ def run(argv=None):
     fetcher = AsyncFetcher(
         concurrency=args.threads, timeout=args.timeout, retries=args.retries,
         delay=args.delay, rate=args.rate, follow_redirects=args.follow,
-        proxy=args.proxy, verify_ssl=not args.insecure)
+        proxy=args.proxy, verify_ssl=not args.insecure, cookies=cookies,
+        jitter=args.jitter, random_agent=args.random_agent, adaptive=args.adaptive)
 
     printer = Printer(quiet=args.silent, verbose=args.verbose,
                       show_progress=not args.no_progress)
@@ -188,16 +229,21 @@ def run(argv=None):
         mutations=mutations,
         recursion_depth=args.recursion_depth if args.recursion else 0,
         stop_on=args.maxhits or None,
-    )
+        smart=args.smart, smart_threshold=args.smart_threshold)
 
     printer.header(None)
 
     async def _go():
-        if args.auto_calibrate:
+        if args.auto_calibrate or args.smart:
             noise = await engine.calibrate()
-            if noise and not args.silent:
-                print(f"{C.DIM}calibrated: filtering {len(noise)} wildcard "
-                      f"signature(s){C.RESET}")
+            if not args.silent:
+                extras = []
+                if noise:
+                    extras.append(f"{len(noise)} wildcard sig(s)")
+                if args.smart:
+                    extras.append("smart soft-404 baseline")
+                if extras:
+                    print(f"{C.DIM}calibrated: {', '.join(extras)}{C.RESET}")
         await engine.run()
 
     try:
@@ -207,10 +253,105 @@ def run(argv=None):
               file=sys.stderr)
 
     printer.finish()
-
     if args.output:
         export(engine.results, args.output, args.output_format)
         if not args.silent:
-            print(f"{C.GREEN}saved{C.RESET} {len(engine.results)} results → "
+            print(f"{C.GREEN}saved{C.RESET} {len(engine.results)} → "
                   f"{args.output} ({args.output_format})")
+    return 0
+
+
+def _render_discover(args):
+    """limitation #3: render the SPA and print routes + API endpoints."""
+    from .render import HAVE_PLAYWRIGHT, discover
+    if not HAVE_PLAYWRIGHT:
+        print(f"{C.RED}error:{C.RESET} pip install playwright && "
+              f"playwright install chromium", file=sys.stderr)
+        return 2
+    url = args.url.replace("/FUZZ", "").replace("FUZZ", "")
+    print(f"{C.CYAN}rendering{C.RESET} {url} …")
+    data = asyncio.run(discover(url))
+    print(f"\n{C.BOLD}API endpoints ({len(data['api'])}):{C.RESET}")
+    for u in data["api"]:
+        print(f"  {C.GREEN}{u}{C.RESET}")
+    print(f"\n{C.BOLD}In-app routes ({len(data['routes'])}):{C.RESET}")
+    for r in data["routes"]:
+        print(f"  {C.CYAN}{r}{C.RESET}")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            for u in data["api"] + data["routes"]:
+                f.write(u + "\n")
+        print(f"\n{C.GREEN}saved{C.RESET} → {args.output}")
+    return 0
+
+
+def _render_seed(args):
+    """Render the SPA and write discovered path segments to a temp wordlist."""
+    from .render import HAVE_PLAYWRIGHT, discover, routes_to_words
+    if not HAVE_PLAYWRIGHT:
+        print(f"{C.RED}error:{C.RESET} pip install playwright && "
+              f"playwright install chromium", file=sys.stderr)
+        return None
+    url = args.url.replace("/FUZZ", "").replace("FUZZ", "")
+    print(f"{C.CYAN}rendering{C.RESET} {url} to seed wordlist …")
+    data = asyncio.run(discover(url))
+    words = routes_to_words(data["routes"] + data["api"])
+    path = "_phantom_seed.txt"
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(words))
+    print(f"{C.GREEN}seeded{C.RESET} {len(words)} path segments → {path}")
+    return path
+
+
+def _run_net(args):
+    if args.no_color:
+        C.strip()
+    from . import net
+    ports = net.parse_ports(args.ports)
+
+    # payload fuzzing mode
+    if args.send:
+        if not args.wordlist:
+            print(f"{C.RED}error:{C.RESET} --send needs -w wordlist", file=sys.stderr)
+            return 2
+        if len(ports) != 1:
+            print(f"{C.RED}error:{C.RESET} --send targets exactly one -p port",
+                  file=sys.stderr)
+            return 2
+        with open(args.wordlist, "r", encoding="utf-8", errors="ignore") as fh:
+            payloads = [l.strip() for l in fh if l.strip()]
+        template = args.send.encode().decode("unicode_escape")  # allow \r\n
+        print(f"{C.CYAN}fuzzing{C.RESET} {args.host}:{ports[0]} "
+              f"with {len(payloads)} payloads")
+        hits = asyncio.run(net.payload_fuzz(
+            args.host, ports[0], payloads, template,
+            timeout=args.timeout, concurrency=args.threads,
+            match_substr=args.match))
+        for h in hits:
+            reply = h["reply"][:80].replace("\n", " ")
+            print(f"  {C.GREEN}{h['payload']}{C.RESET} → {C.DIM}{reply}{C.RESET}")
+        print(f"{C.BOLD}{len(hits)} hit(s){C.RESET}")
+        return 0
+
+    # port scan mode
+    results = asyncio.run(net.scan(
+        args.host, ports, concurrency=args.threads,
+        timeout=args.timeout, grab=not args.no_banner))
+    net.print_scan(args.host, results)
+    return 0
+
+
+def run(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # backward compat: default to 'web' when no subcommand is given
+    known = {"web", "net", "-h", "--help", "-V", "--version"}
+    if argv and argv[0] not in known:
+        argv = ["web"] + argv
+    args = build_parser().parse_args(argv)
+
+    if args.command == "net":
+        return _run_net(args)
+    if args.command == "web":
+        return _run_web(args)
+    build_parser().print_help()
     return 0

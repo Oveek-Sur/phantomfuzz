@@ -2,10 +2,16 @@
 
 import sys
 
-# Enable ANSI colors on Windows terminals
+# Enable ANSI colors on Windows terminals and force UTF-8 output so that
+# arrows/box-drawing/check marks (→ █ ✓) don't crash on cp1252 consoles/pipes.
 if sys.platform == "win32":
     import os
     os.system("")
+    for _stream in ("stdout", "stderr"):
+        try:
+            getattr(sys, _stream).reconfigure(encoding="utf-8")
+        except Exception:
+            pass
 
 
 class C:

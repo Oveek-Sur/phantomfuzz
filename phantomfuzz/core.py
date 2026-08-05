@@ -4,6 +4,7 @@ import asyncio
 import random
 import string
 
+from .detect import SoftError
 from .http_client import AsyncFetcher, build_request
 from .wordlist import apply_mutations
 
@@ -12,7 +13,7 @@ class Engine:
     def __init__(self, base_request, wordset, fetcher: AsyncFetcher,
                  filter_engine, printer, mutations=None, recursion_depth=0,
                  recursion_codes=(301, 302, 307, 308, 401, 403),
-                 collect=True, stop_on=None):
+                 collect=True, stop_on=None, smart=False, smart_threshold=0.90):
         self.base = base_request
         self.wordset = wordset
         self.fetcher = fetcher
@@ -23,6 +24,8 @@ class Engine:
         self.recursion_codes = set(recursion_codes)
         self.collect = collect
         self.stop_on = stop_on            # stop after N matches (0/None = no cap)
+        self.smart = smart                # content-similarity soft-404 filter
+        self.soft = SoftError(threshold=smart_threshold)
         self.results = []
         self._recurse_queue = []
         self._stop = False
@@ -38,6 +41,9 @@ class Engine:
         def _grab(resp):
             if resp.ok:
                 noise.add((resp.status, resp.size))
+                # feed the smart content-similarity detector too
+                if self.smart:
+                    self.soft.learn(resp)
 
         fake = []
         for _ in range(samples):
@@ -68,6 +74,9 @@ class Engine:
     def _on_result(self, resp):
         self.printer.tick(resp)
         if not resp.ok:
+            return
+        # smart false-positive filter: drop pages too similar to soft-404 baseline
+        if self.smart and self.soft.is_false_positive(resp):
             return
         if self.filters.show(resp):
             self.printer.result(resp)
