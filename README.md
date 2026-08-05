@@ -30,6 +30,8 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 🕵️ **Proxy support** | route through Burp/ZAP (`--proxy`) |
 | 💾 **Export** | JSON, CSV, HTML report, or plain text |
 | 📊 **Live UI** | colored results + progress bar, ETA, req/s |
+| 🕷️ **Crawler/spider** | auto-discovers URLs, forms & parameters — no Burp needed |
+| 🎁 **PayloadsAllTheThings** | 66 payload categories built in (`-w patt:xss`) |
 
 ### 🚀 Beyond ffuf — the five limitations, solved
 
@@ -44,6 +46,8 @@ tackles each:
 | **4** | False positives from soft-404 / branded error pages | **`--smart`** — learns a baseline and filters responses by *content similarity*, not just status/size |
 | **5** | Trips WAFs / rate-limiters instantly | **`--adaptive --jitter --random-agent`** — detects blocking, auto-backs-off, jitters timing, rotates User-Agents |
 | **7** | Blind to business-logic bugs (IDOR, price/param tampering, race conditions) | **`idor` / `tamper` / `race` subcommands** — differential analyzers that compare responses against a baseline to surface logic flaws automatically |
+| **+** | You needed Burp to *find* URLs/params first | **`crawl` subcommand** — built-in spider maps the site (links, forms, params); `--tamper` auto-tests every param'd URL it finds |
+| **+** | You had to hunt for attack payloads | **`payloads` subcommand + `patt:` wordlists** — bundles [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings) (66 categories) as instant wordlists |
 
 ---
 
@@ -208,6 +212,56 @@ python -m phantomfuzz race -u https://target.tld/redeem -X POST \
 > ⚠️ These probe *behavior* and can change server state (place orders, spend
 > credits, mutate records). Run them **only** against your own test
 > environment, and expect to verify findings by hand in Burp Repeater.
+
+### 🕷️ Crawl / spider — discover URLs without Burp
+The `crawl` subcommand walks the site for you: it follows in-scope links,
+parses `<form>` fields, and records every URL that carries query parameters —
+exactly the map you used to build by hand in Burp before fuzzing.
+
+```bash
+# Map a site: pages, forms, and parameterized URLs
+python -m phantomfuzz crawl -u https://target.tld --depth 3 --max 500 -o urls.txt
+
+# Also render JS to catch SPA routes + XHR/API endpoints
+python -m phantomfuzz crawl -u https://target.tld --render
+
+# Full auto: crawl, then tamper-test every parameterized URL found
+python -m phantomfuzz crawl -u https://target.tld --tamper \
+    --auth-url https://target.tld/login --auth-data 'user=me&pass=pw'
+```
+
+The `--tamper` flag chains straight into the logic analyzer — a one-command
+"find endpoints → test business logic" pipeline that previously meant Burp
+Spider + Repeater.
+
+### 🎁 PayloadsAllTheThings — instant attack wordlists
+PhantomFuzz bundles [swisskyrepo/PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings)
+as a git submodule and indexes all 66 categories. Use them anywhere a wordlist
+is expected via the `patt:` prefix.
+
+```bash
+# First-time / update the payload database
+python -m phantomfuzz payloads --update      # (or: git submodule update --init)
+
+# Browse what's available
+python -m phantomfuzz payloads --list
+python -m phantomfuzz payloads --show xss    # preview + count
+
+# Use a category directly as a wordlist (no export step needed)
+python -m phantomfuzz web -u "https://target.tld/search?q=FUZZ" -w patt:xss  -fr "no results"
+python -m phantomfuzz web -u "https://target.tld/item?id=FUZZ"   -w patt:sqli -mr "SQL|syntax"
+
+# Or export a category to a plain file
+python -m phantomfuzz payloads --export lfi lfi.txt
+```
+
+Aliases include: `xss, sqli, nosql, lfi, traversal, rce, cmd, ssti, ssrf, xxe,
+crlf, ldap, xpath, upload, csv, graphql, jwt, redirect, prompt` — or pass any
+category name shown by `--list`.
+
+> **Cloning the repo?** The payload set is a submodule, so use
+> `git clone --recursive`, or after a plain clone run
+> `git submodule update --init --depth 1`.
 
 ---
 

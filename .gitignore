@@ -14,3 +14,6 @@ out.json
 out.csv
 out.html
 results/
+# generated temp wordlists/seeds
+_phantom_seed.txt
+_phantom_payload_*.txt

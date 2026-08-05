@@ -34,7 +34,38 @@ EPILOG = f"""{C.BOLD}web examples:{C.RESET}
 """
 
 
+def expand_payload_arg(value):
+    """Resolve a `patt:ALIAS[:KEYWORD]` wordlist into a generated temp file.
+
+    e.g. 'patt:xss' or 'ptt:sqli:FUZ2Z'. Returns the possibly-rewritten spec
+    string (path[:KEYWORD]) that parse_wordlist_spec understands.
+    """
+    for prefix in ("patt:", "ptt:"):
+        if value.startswith(prefix):
+            from . import payloads
+            rest = value[len(prefix):]
+            # optional trailing :KEYWORD
+            keyword = None
+            if ":" in rest:
+                rest, keyword = rest.split(":", 1)
+            if not payloads.is_installed():
+                print(f"{C.RED}error:{C.RESET} PayloadsAllTheThings not installed. "
+                      f"Run: phantomfuzz payloads --update", file=sys.stderr)
+                sys.exit(2)
+            out = f"_phantom_payload_{rest}.txt"
+            n = payloads.export(rest, out)
+            if not n:
+                print(f"{C.RED}error:{C.RESET} no payload category matches "
+                      f"'{rest}'. Try: phantomfuzz payloads --list", file=sys.stderr)
+                sys.exit(2)
+            print(f"{C.GREEN}loaded{C.RESET} {n} '{rest}' payloads "
+                  f"from PayloadsAllTheThings")
+            return f"{out}:{keyword}" if keyword else out
+    return value
+
+
 def parse_wordlist_spec(value):
+    value = expand_payload_arg(value)
     if ":" in value and not value[1:3] == ":\\":
         path, _, kw = value.rpartition(":")
         if path and kw and "/" not in kw and "\\" not in kw:
@@ -178,6 +209,33 @@ def build_parser():
     n.add_argument("--timeout", type=float, default=3.0)
     n.add_argument("--no-banner", action="store_true", help="skip banner grabbing")
     n.add_argument("--no-color", action="store_true")
+
+    # ---------------- crawl (spider) ----------------
+    c = sub.add_parser("crawl", help="spider a site: discover URLs, forms, params")
+    c.add_argument("-u", "--url", required=True, help="start URL")
+    c.add_argument("--depth", type=int, default=2, help="max link depth")
+    c.add_argument("--max", type=int, default=200, help="max pages to crawl")
+    c.add_argument("-t", "--threads", type=int, default=15)
+    c.add_argument("--timeout", type=float, default=10)
+    c.add_argument("--delay", type=float, default=0.0)
+    c.add_argument("--include", metavar="REGEX", help="only crawl URLs matching")
+    c.add_argument("--exclude", metavar="REGEX", help="skip URLs matching")
+    c.add_argument("--render", action="store_true",
+                   help="also render with a browser to catch SPA routes/APIs")
+    c.add_argument("--tamper", action="store_true",
+                   help="run the tamper analyzer on every param'd URL found")
+    c.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
+    add_auth(c)
+
+    # ---------------- payloads (PayloadsAllTheThings) ----------------
+    pl = sub.add_parser("payloads", help="manage PayloadsAllTheThings payload sets")
+    pl.add_argument("--list", action="store_true", help="list categories & aliases")
+    pl.add_argument("--show", metavar="TERM", help="preview payloads for a category")
+    pl.add_argument("--export", nargs=2, metavar=("TERM", "FILE"),
+                    help="write a category's payloads to FILE")
+    pl.add_argument("--update", action="store_true", help="clone/pull the repo")
+    pl.add_argument("--limit", type=int, default=0, help="cap payload count")
+    pl.add_argument("--no-color", action="store_true")
     return p
 
 
@@ -492,6 +550,102 @@ def _run_tamper(args):
     return 0
 
 
+def _run_crawl(args):
+    if args.no_color:
+        C.strip()
+    from .crawl import Crawler, merge_rendered
+    show(__version__)
+    cookies, headers = _resolve_auth(args)
+    crawler = Crawler(
+        args.url, max_depth=args.depth, max_pages=args.max,
+        concurrency=args.threads, timeout=args.timeout,
+        verify_ssl=not args.insecure, cookies=cookies, headers=headers,
+        delay=args.delay, include_re=args.include, exclude_re=args.exclude)
+
+    def prog(pages, queued):
+        print(f"\r{C.CYAN}crawling{C.RESET} {pages} pages "
+              f"({queued} discovered)", end="", flush=True)
+
+    result = asyncio.run(crawler.run(on_progress=prog))
+    print()
+    if args.render:
+        try:
+            result, ok = asyncio.run(merge_rendered(result, args.url))
+            if ok:
+                print(f"{C.DIM}merged browser-rendered SPA routes/APIs{C.RESET}")
+        except Exception as e:  # noqa: BLE001
+            print(f"{C.YELLOW}render skipped: {e}{C.RESET}")
+
+    print(f"\n{C.BOLD}Crawl summary for {args.url}{C.RESET}")
+    print(f"  pages found : {C.GREEN}{len(result['pages'])}{C.RESET}")
+    print(f"  param'd URLs: {C.GREEN}{len(result['params'])}{C.RESET}")
+    print(f"  forms       : {C.GREEN}{len(result['forms'])}{C.RESET}")
+
+    if result["params"]:
+        print(f"\n{C.BOLD}URLs with parameters (tamper targets):{C.RESET}")
+        for u, names in sorted(result["params"].items()):
+            print(f"  {C.CYAN}{u}{C.RESET}  {C.DIM}?{'&'.join(names)}{C.RESET}")
+    if result["forms"]:
+        print(f"\n{C.BOLD}Forms:{C.RESET}")
+        for form in result["forms"]:
+            print(f"  {C.YELLOW}{form['method']}{C.RESET} {form['action']}  "
+                  f"{C.DIM}[{', '.join(form['inputs'])}]{C.RESET}")
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            for u in result["pages"]:
+                f.write(u + "\n")
+        print(f"\n{C.GREEN}saved{C.RESET} {len(result['pages'])} URLs → {args.output}")
+
+    # ---- optional: auto-tamper every discovered param'd URL (no Burp needed) ----
+    if args.tamper and result["params"]:
+        from .logic import tamper_test
+        print(f"\n{C.BOLD}Auto-tampering {len(result['params'])} param'd URL(s)…{C.RESET}")
+        for base_url, names in sorted(result["params"].items()):
+            # rebuild a URL carrying the discovered params with dummy values
+            q = "&".join(f"{n}=1" for n in names)
+            target = f"{base_url}?{q}"
+            base = {"url": target, "method": "GET", "headers": headers, "body": None}
+            try:
+                baseline, findings = asyncio.run(tamper_test(
+                    base, cookies=cookies, headers=headers,
+                    verify_ssl=not args.insecure))
+            except Exception as e:  # noqa: BLE001
+                print(f"  {C.DIM}{base_url}: {e}{C.RESET}")
+                continue
+            if findings:
+                print(f"  {C.RED}{base_url}{C.RESET} — {len(findings)} behavior change(s)")
+                for fnd in findings:
+                    r = fnd["response"]
+                    print(f"      {fnd['key']}={fnd['payload']} "
+                          f"[{r.status}] {r.size}b {C.DIM}{fnd['why']}{C.RESET}")
+            else:
+                print(f"  {C.DIM}{base_url}: no change{C.RESET}")
+    return 0
+
+
+def _run_payloads(args):
+    if args.no_color:
+        C.strip()
+    from . import payloads
+    if args.update:
+        return 0 if payloads.update() else 1
+    if args.list:
+        return payloads.cmd_list()
+    if args.show:
+        return payloads.cmd_show(args.show)
+    if args.export:
+        term, path = args.export
+        n = payloads.export(term, path, limit=args.limit)
+        if not n:
+            print(f"{C.RED}no category matches '{term}'{C.RESET}", file=sys.stderr)
+            return 1
+        print(f"{C.GREEN}exported{C.RESET} {n} '{term}' payloads → {path}")
+        return 0
+    print("nothing to do — try --list, --show TERM, --export TERM FILE, --update")
+    return 0
+
+
 def _run_net(args):
     if args.no_color:
         C.strip()
@@ -533,7 +687,7 @@ def _run_net(args):
 def run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
-    known = {"web", "net", "idor", "race", "tamper",
+    known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",
              "-h", "--help", "-V", "--version"}
     if argv and argv[0] not in known:
         argv = ["web"] + argv
@@ -542,6 +696,7 @@ def run(argv=None):
     dispatch = {
         "web": _run_web, "net": _run_net, "idor": _run_idor,
         "race": _run_race, "tamper": _run_tamper,
+        "crawl": _run_crawl, "payloads": _run_payloads,
     }
     handler = dispatch.get(args.command)
     if handler:
