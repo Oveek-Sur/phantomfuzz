@@ -31,6 +31,7 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 💾 **Export** | JSON, CSV, HTML report, or plain text |
 | 📊 **Live UI** | colored results + progress bar, ETA, req/s |
 | 🕷️ **Crawler/spider** | auto-discovers URLs, forms & parameters — no Burp needed |
+| 🧠 **JS-bundle intel** | mines SPA JS for hidden routes, API endpoints, backends (Supabase/Firebase/S3) & leaked keys — no headless browser |
 | 🎁 **PayloadsAllTheThings** | 66 payload categories built in (`-w patt:xss`) |
 
 ### 🚀 Beyond ffuf — the five limitations, solved
