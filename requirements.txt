@@ -1,1 +1,6 @@
 aiohttp>=3.8
+
+# Optional: headless-browser rendering for SPA discovery (auto --render,
+# web --render-discover / --render-seed). Install with:
+#   pip install playwright && playwright install chromium
+# playwright>=1.40
