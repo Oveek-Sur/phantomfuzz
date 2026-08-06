@@ -37,6 +37,7 @@ class _LinkParser(HTMLParser):
         super().__init__()
         self.links = []
         self.scripts = []
+        self.sources = []        # img/iframe/source/audio/video src (param carriers)
         self.forms = []          # list of {action, method, inputs:[names]}
         self._cur_form = None
 
@@ -48,6 +49,10 @@ class _LinkParser(HTMLParser):
             self.links.append(a["href"])
         elif tag == "script" and a.get("src"):
             self.scripts.append(a["src"])
+        elif tag in ("img", "iframe", "source", "audio", "video", "embed") \
+                and a.get("src"):
+            # resource URLs like /image?filename=1.jpg are prime fuzz targets
+            self.sources.append(a["src"])
         elif tag == "form":
             self._cur_form = {
                 "action": a.get("action", ""),
@@ -113,14 +118,23 @@ class Crawler:
             self.with_params.setdefault(base, set()).update(names)
 
     async def _fetch(self, session, url):
-        try:
-            async with session.get(url, allow_redirects=True) as r:
-                ctype = r.headers.get("Content-Type", "")
-                if "html" not in ctype.lower():
-                    return None, str(r.url)
-                return await r.text(errors="ignore"), str(r.url)
-        except Exception:
-            return None, url
+        # retry a couple of times — cold-start/slow targets often time out once
+        for attempt in range(3):
+            try:
+                async with session.get(url, allow_redirects=True) as r:
+                    # cold-start labs/backends often answer 502/503/504 first
+                    if r.status in (502, 503, 504) and attempt < 2:
+                        await asyncio.sleep(2.0)
+                        continue
+                    ctype = r.headers.get("Content-Type", "")
+                    if "html" not in ctype.lower():
+                        return None, str(r.url)
+                    return await r.text(errors="ignore"), str(r.url)
+            except Exception:
+                if attempt == 2:
+                    return None, url
+                await asyncio.sleep(1.5)
+        return None, url
 
     def _extract(self, html, page_url):
         p = _LinkParser()
@@ -137,6 +151,12 @@ class Crawler:
                 found.append(absu)
         for s in p.scripts:
             self.assets.add(urljoin(page_url, s))
+        # img/iframe/etc. src that carry a query string are fuzzable endpoints
+        for src in p.sources:
+            absu = urldefrag(urljoin(page_url, src))[0]
+            if absu.startswith("http") and self._want(absu):
+                if "?" in absu:
+                    self._record_params(absu)
         for form in p.forms:
             action = urljoin(page_url, form["action"] or page_url)
             entry = {"action": action, "method": form["method"],

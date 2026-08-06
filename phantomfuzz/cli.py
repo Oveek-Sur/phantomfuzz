@@ -269,6 +269,30 @@ def build_parser():
     pl.add_argument("--update", action="store_true", help="clone/pull the repo")
     pl.add_argument("--limit", type=int, default=0, help="cap payload count")
     pl.add_argument("--no-color", action="store_true")
+
+    # ---------------- auto (autopilot: discover -> show -> test) ----------------
+    au = sub.add_parser(
+        "auto", help="autopilot: crawl, show endpoints, then auto-test them",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="  phantomfuzz auto -u https://target.com\n"
+               "  phantomfuzz auto -u https://target.com --discover-only\n"
+               "  phantomfuzz auto -u https://target.com -w patt:xss  # fuzz found endpoints with your list")
+    au.add_argument("-u", "--url", required=True, help="target site")
+    au.add_argument("--depth", type=int, default=2, help="crawl link depth")
+    au.add_argument("--max", type=int, default=120, help="max pages to crawl")
+    au.add_argument("-t", "--threads", type=int, default=12)
+    au.add_argument("--timeout", type=float, default=15)
+    au.add_argument("--render", action="store_true",
+                    help="use a headless browser (Playwright) during discovery")
+    au.add_argument("--discover-only", action="store_true",
+                    help="only crawl & show the endpoint map, don't test")
+    au.add_argument("-w", "--wordlist", action="append", metavar="FILE[:KW]",
+                    help="fuzz discovered endpoints with this list instead of "
+                         "the default security battery (repeatable, patt: ok)")
+    au.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
+    au.add_argument("--yes", action="store_true",
+                    help="don't pause between discovery and testing")
+    add_auth(au)
     return p
 
 
@@ -689,6 +713,167 @@ def _run_crawl(args):
     return 0
 
 
+def _run_auto(args):
+    if args.no_color:
+        C.strip()
+    from . import auto
+    show(__version__)
+    if not HAVE_AIOHTTP:
+        print(f"{C.RED}error:{C.RESET} pip install aiohttp", file=sys.stderr)
+        return 2
+    cookies, headers = _resolve_auth(args)
+
+    # ---- 1. DISCOVER ----
+    print(f"{C.BOLD}[1/3] Discovering attack surface on {args.url} …{C.RESET}")
+
+    def log(msg):
+        print(f"  {C.DIM}{msg}{C.RESET}")
+
+    result = asyncio.run(auto.discover(
+        args.url, cookies=cookies, headers=headers,
+        verify_ssl=not args.insecure, depth=args.depth, max_pages=args.max,
+        use_render=args.render, on_log=log, timeout=args.timeout))
+
+    intel = result.get("js_intel", {})
+    targets = auto.parameterised_targets(result)
+
+    # ---- 2. SHOW ----
+    print(f"\n{C.BOLD}[2/3] Discovered surface:{C.RESET}")
+    print(f"  pages           : {C.GREEN}{len(result['pages'])}{C.RESET}")
+    print(f"  parameterised   : {C.GREEN}{len(targets)}{C.RESET}")
+    print(f"  API endpoints   : {C.GREEN}{len(intel.get('apis', []))}{C.RESET}")
+    print(f"  backends        : {C.GREEN}{len(intel.get('backends', []))}{C.RESET}")
+    if intel.get("backends"):
+        print(f"\n  {C.BOLD}Backends:{C.RESET}")
+        for b in intel["backends"]:
+            print(f"    {C.MAGENTA}{b}{C.RESET}")
+    if intel.get("apis"):
+        print(f"\n  {C.BOLD}API endpoints:{C.RESET}")
+        for a in intel["apis"]:
+            print(f"    {C.CYAN}{a}{C.RESET}")
+    if intel.get("routes"):
+        print(f"\n  {C.BOLD}Client-side routes:{C.RESET}")
+        for r in intel["routes"]:
+            print(f"    {C.GREEN}{r}{C.RESET}")
+    if targets:
+        print(f"\n  {C.BOLD}Parameterised targets (will be tested):{C.RESET}")
+        for url, names in targets:
+            print(f"    {C.CYAN}{url.split('?')[0]}{C.RESET}  "
+                  f"{C.DIM}?{'&'.join(names)}{C.RESET}")
+    if intel.get("secrets"):
+        print(f"\n  {C.RED}Possible leaked keys/tokens:{C.RESET}")
+        for s in intel["secrets"]:
+            print(f"    {C.RED}{s[:60]}…{C.RESET}")
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            for u in result["pages"]:
+                f.write(u + "\n")
+        print(f"\n  {C.GREEN}saved{C.RESET} {len(result['pages'])} URLs → {args.output}")
+
+    if args.discover_only:
+        print(f"\n{C.DIM}discover-only: stopping before tests.{C.RESET}")
+        return 0
+
+    # ---- custom wordlist path: fuzz each discovered param'd endpoint ----
+    if args.wordlist:
+        return _auto_fuzz_with_wordlist(args, targets, cookies, headers)
+
+    if not targets:
+        print(f"\n{C.YELLOW}No parameterised endpoints to auto-test.{C.RESET} "
+              f"Try --render, or fuzz a route with: phantomfuzz web -u "
+              f"{args.url.rstrip('/')}/FUZZ -w wordlists/common.txt --smart")
+        return 0
+
+    # ---- 3. TEST (default security battery) ----
+    if not args.yes and sys.stdin.isatty():
+        try:
+            input(f"\n{C.BOLD}[3/3] Press Enter to auto-test "
+                  f"{len(targets)} endpoint(s) (Ctrl-C to stop)…{C.RESET} ")
+        except (KeyboardInterrupt, EOFError):
+            print("\nstopped.")
+            return 0
+    print(f"\n{C.BOLD}[3/3] Auto-testing (traversal · XSS · SQLi · redirect)…{C.RESET}")
+
+    def prog(done, total):
+        print(f"\r  {C.CYAN}probing{C.RESET} {done}/{total} params", end="", flush=True)
+
+    findings = asyncio.run(auto.test_targets(
+        targets, cookies=cookies, headers=headers,
+        verify_ssl=not args.insecure, timeout=args.timeout,
+        concurrency=args.threads, on_log=log, on_progress=prog))
+    print()
+
+    if not findings:
+        print(f"\n{C.GREEN}No obvious vulnerabilities surfaced.{C.RESET} "
+              f"(good — or dig deeper with idor/tamper/race)")
+        return 0
+
+    print(f"\n{C.BOLD}{C.RED}⚠ {len(findings)} potential finding(s):{C.RESET}")
+    for url, kind, key, payload, r, why in findings:
+        print(f"  {C.RED}{kind}{C.RESET} @ {C.CYAN}{url.split('?')[0]}{C.RESET} "
+              f"param {C.BOLD}{key}{C.RESET}")
+        print(f"      payload: {C.DIM}{payload[:70]}{C.RESET}")
+        print(f"      [{r.status}] {r.size}b — {why}")
+    print(f"\n{C.DIM}Verify by hand before reporting. Logic bugs? "
+          f"try: phantomfuzz idor|tamper|race{C.RESET}")
+    return 0
+
+
+def _auto_fuzz_with_wordlist(args, targets, cookies, headers):
+    """User supplied -w: fuzz each discovered param'd endpoint with it."""
+    from .core import Engine
+    from .wordlist import WordlistSet
+    from .filters import FilterEngine, Rule
+    from .output import Printer
+    from .http_client import AsyncFetcher
+
+    if not targets:
+        print(f"\n{C.YELLOW}No parameterised endpoints found to fuzz.{C.RESET}")
+        return 0
+    specs = [parse_wordlist_spec(w) for w in args.wordlist]
+    print(f"\n{C.BOLD}[3/3] Fuzzing {len(targets)} endpoint(s) with your "
+          f"wordlist…{C.RESET}")
+
+    for url, names in targets:
+        key = names[0]  # fuzz the first param of each target
+        fuzz_url = _set_param_cli(url, key, "FUZZ")
+        print(f"\n{C.CYAN}→ {fuzz_url}{C.RESET}")
+        try:
+            wordset = WordlistSet(specs, mode="sniper")
+        except FileNotFoundError as e:
+            print(f"  {C.RED}{e}{C.RESET}")
+            return 2
+        base_request = {"url": fuzz_url, "method": "GET",
+                        "headers": headers, "body": None}
+        fetcher = AsyncFetcher(
+            concurrency=args.threads, timeout=args.timeout,
+            verify_ssl=not args.insecure, cookies=cookies)
+        printer = Printer(quiet=False, verbose=False, show_progress=True)
+        filter_engine = FilterEngine(Rule(), Rule())
+        engine = Engine(base_request, wordset, fetcher, filter_engine, printer,
+                        smart=True)
+        printer.header(None)
+
+        async def _go(engine=engine):
+            await engine.calibrate()
+            await engine.run()
+        try:
+            asyncio.run(_go())
+        except Exception as e:  # noqa: BLE001
+            print(f"  {C.DIM}error: {e}{C.RESET}")
+        printer.finish()
+    return 0
+
+
+def _set_param_cli(url, key, value):
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    q = parse_qsl(parts.query, keep_blank_values=True)
+    q = [(k, value if k == key else v) for k, v in q]
+    return urlunsplit(parts._replace(query=urlencode(q, safe="Z")))
+
+
 def _run_payloads(args):
     if args.no_color:
         C.strip()
@@ -753,7 +938,7 @@ def run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
     known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",
-             "-h", "--help", "-V", "--version"}
+             "auto", "-h", "--help", "-V", "--version"}
     if argv and argv[0] not in known:
         argv = ["web"] + argv
     args = build_parser().parse_args(argv)
@@ -761,7 +946,7 @@ def run(argv=None):
     dispatch = {
         "web": _run_web, "net": _run_net, "idor": _run_idor,
         "race": _run_race, "tamper": _run_tamper,
-        "crawl": _run_crawl, "payloads": _run_payloads,
+        "crawl": _run_crawl, "payloads": _run_payloads, "auto": _run_auto,
     }
     handler = dispatch.get(args.command)
     if handler:
