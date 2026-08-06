@@ -34,16 +34,27 @@ EPILOG = f"""{C.BOLD}web examples:{C.RESET}
 """
 
 
+# placeholder tokens PayloadsAllTheThings uses for "the file/path you want"
+_FILE_TOKENS = ("{FILE}", "{FILENAME}", "{PATH_TO_FILE}", "{PATH}", "{TARGET}",
+                "PATH_TO_FILE", "{file}")
+
+
 def expand_payload_arg(value):
     """Resolve a `patt:ALIAS[:KEYWORD]` wordlist into a generated temp file.
 
-    e.g. 'patt:xss' or 'ptt:sqli:FUZ2Z'. Returns the possibly-rewritten spec
-    string (path[:KEYWORD]) that parse_wordlist_spec understands.
+    e.g. 'patt:xss' or 'ptt:sqli:FUZ2Z'. For file-oriented categories you can
+    substitute the target file into the payload placeholders with an `@` suffix:
+    'patt:traversal@etc/passwd' turns '../{FILE}' into '../etc/passwd'.
+    Returns the possibly-rewritten spec string parse_wordlist_spec understands.
     """
     for prefix in ("patt:", "ptt:"):
         if value.startswith(prefix):
             from . import payloads
             rest = value[len(prefix):]
+            # optional '@TARGETFILE' to fill {FILE}-style placeholders
+            target_file = None
+            if "@" in rest:
+                rest, target_file = rest.split("@", 1)
             # optional trailing :KEYWORD
             keyword = None
             if ":" in rest:
@@ -52,14 +63,34 @@ def expand_payload_arg(value):
                 print(f"{C.RED}error:{C.RESET} PayloadsAllTheThings not installed. "
                       f"Run: phantomfuzz payloads --update", file=sys.stderr)
                 sys.exit(2)
-            out = f"_phantom_payload_{rest}.txt"
-            n = payloads.export(rest, out)
-            if not n:
+            words = payloads.collect(rest)
+            if not words:
                 print(f"{C.RED}error:{C.RESET} no payload category matches "
                       f"'{rest}'. Try: phantomfuzz payloads --list", file=sys.stderr)
                 sys.exit(2)
-            print(f"{C.GREEN}loaded{C.RESET} {n} '{rest}' payloads "
-                  f"from PayloadsAllTheThings")
+            # substitute the requested target file into placeholder tokens
+            if target_file:
+                out_words = []
+                for w in words:
+                    for tok in _FILE_TOKENS:
+                        w = w.replace(tok, target_file)
+                    out_words.append(w)
+                # keep only payloads that actually reference a file placeholder
+                filled = [w for w in out_words if target_file in w]
+                words = filled or out_words
+                # de-dup post-substitution
+                seen, uniq = set(), []
+                for w in words:
+                    if w not in seen:
+                        seen.add(w)
+                        uniq.append(w)
+                words = uniq
+            out = f"_phantom_payload_{rest}.txt"
+            with open(out, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(words))
+            extra = f" (filled {{FILE}}→{target_file})" if target_file else ""
+            print(f"{C.GREEN}loaded{C.RESET} {len(words)} '{rest}' payloads "
+                  f"from PayloadsAllTheThings{extra}")
             return f"{out}:{keyword}" if keyword else out
     return value
 
