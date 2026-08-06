@@ -19,12 +19,15 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urldefrag
 
 from .banner import C
+from . import jsintel
 
 try:
     import aiohttp
     HAVE_AIOHTTP = True
 except ImportError:
     HAVE_AIOHTTP = False
+
+BROWSER_UA = jsintel.BROWSER_UA
 
 
 class _LinkParser(HTMLParser):
@@ -77,7 +80,9 @@ class Crawler:
         self.timeout = timeout
         self.verify_ssl = verify_ssl
         self.cookies = cookies or {}
-        self.headers = headers or {}
+        self.headers = dict(headers or {})
+        # many SPAs / WAFs 403 the default aiohttp UA — look like a browser
+        self.headers.setdefault("User-Agent", BROWSER_UA)
         self.delay = delay
         self.include_re = re.compile(include_re) if include_re else None
         self.exclude_re = re.compile(exclude_re) if exclude_re else None
@@ -127,7 +132,8 @@ class Crawler:
         for href in p.links:
             absu = urldefrag(urljoin(page_url, href))[0]
             if absu.startswith("http"):
-                self._record_params(absu)
+                if self._want(absu):        # only in-scope URLs become targets
+                    self._record_params(absu)
                 found.append(absu)
         for s in p.scripts:
             self.assets.add(urljoin(page_url, s))
@@ -192,6 +198,33 @@ class Crawler:
             "forms": self.forms,
             "assets": sorted(self.assets),
         }
+
+
+async def merge_js_intel(result, start_url, cookies=None, headers=None,
+                         verify_ssl=False):
+    """Mine the SPA's JS bundles and fold discovered routes/APIs into results.
+
+    This is what lets the crawler see a static React/Vue SPA's real surface
+    without a headless browser: routes and API endpoints hidden in the bundle
+    become crawlable/fuzzable targets.
+    """
+    data = await jsintel.harvest(start_url, cookies=cookies, headers=headers,
+                                 verify_ssl=verify_ssl)
+    # client-side routes -> add as pages to crawl/fuzz
+    for r in data.get("routes", []):
+        full = urljoin(start_url, r)
+        if full not in result["pages"]:
+            result["pages"].append(full)
+    result["pages"] = sorted(set(result["pages"]))
+    # carry the intel through so the CLI can print it
+    result["js_intel"] = {
+        "apis": data.get("apis", []),
+        "backends": data.get("backends", []),
+        "secrets": data.get("secrets", []),
+        "routes": data.get("routes", []),
+        "bundles": data.get("bundles", []),
+    }
+    return result, bool(data.get("bundles"))
 
 
 async def merge_rendered(result, start_url):

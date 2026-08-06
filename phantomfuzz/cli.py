@@ -222,6 +222,8 @@ def build_parser():
     c.add_argument("--exclude", metavar="REGEX", help="skip URLs matching")
     c.add_argument("--render", action="store_true",
                    help="also render with a browser to catch SPA routes/APIs")
+    c.add_argument("--no-js", action="store_true",
+                   help="disable JS-bundle mining (routes/APIs/backends)")
     c.add_argument("--tamper", action="store_true",
                    help="run the tamper analyzer on every param'd URL found")
     c.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
@@ -553,7 +555,7 @@ def _run_tamper(args):
 def _run_crawl(args):
     if args.no_color:
         C.strip()
-    from .crawl import Crawler, merge_rendered
+    from .crawl import Crawler, merge_rendered, merge_js_intel
     show(__version__)
     cookies, headers = _resolve_auth(args)
     crawler = Crawler(
@@ -568,6 +570,19 @@ def _run_crawl(args):
 
     result = asyncio.run(crawler.run(on_progress=prog))
     print()
+
+    # JS-bundle intelligence: mine SPA routes/APIs/backends without a browser
+    if not args.no_js:
+        try:
+            result, ok = asyncio.run(merge_js_intel(
+                result, args.url, cookies=cookies, headers=headers,
+                verify_ssl=not args.insecure))
+            if ok:
+                n = len(result.get("js_intel", {}).get("bundles", []))
+                print(f"{C.DIM}mined {n} JS bundle(s) for SPA routes/APIs{C.RESET}")
+        except Exception as e:  # noqa: BLE001
+            print(f"{C.YELLOW}JS intel skipped: {e}{C.RESET}")
+
     if args.render:
         try:
             result, ok = asyncio.run(merge_rendered(result, args.url))
@@ -590,6 +605,25 @@ def _run_crawl(args):
         for form in result["forms"]:
             print(f"  {C.YELLOW}{form['method']}{C.RESET} {form['action']}  "
                   f"{C.DIM}[{', '.join(form['inputs'])}]{C.RESET}")
+
+    intel = result.get("js_intel")
+    if intel:
+        if intel["backends"]:
+            print(f"\n{C.BOLD}Backend hosts / services (from JS):{C.RESET}")
+            for b in intel["backends"]:
+                print(f"  {C.MAGENTA}{b}{C.RESET}")
+        if intel["apis"]:
+            print(f"\n{C.BOLD}API endpoints (from JS):{C.RESET}")
+            for a in intel["apis"]:
+                print(f"  {C.CYAN}{a}{C.RESET}")
+        if intel["routes"]:
+            print(f"\n{C.BOLD}Client-side routes (from JS bundle):{C.RESET}")
+            for r in intel["routes"]:
+                print(f"  {C.GREEN}{r}{C.RESET}")
+        if intel["secrets"]:
+            print(f"\n{C.BOLD}{C.RED}Possible leaked keys/tokens (from JS):{C.RESET}")
+            for sleak in intel["secrets"]:
+                print(f"  {C.RED}{sleak[:60]}…{C.RESET}")
 
     if args.output:
         with open(args.output, "w", encoding="utf-8") as f:
