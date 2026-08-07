@@ -76,6 +76,32 @@ commands when you want precise control.
 
 ---
 
+## 0.5 Prefer ffuf? The interactive `ffuf` wizard
+
+If you'd rather drive **ffuf** but not memorize flags:
+
+```bash
+python -m phantomfuzz ffuf        # (needs ffuf installed: sudo apt install -y ffuf)
+```
+
+It walks you through everything, in plain English:
+
+1. **Pick a task** — directory/file discovery, parameter-value fuzzing,
+   extension brute, vhost discovery, or subdomain brute.
+2. **Give a target** — it then **probes the edge first**: if the site is behind
+   **Cloudflare** (or Akamai/Sucuri/Incapsula/CloudFront/Fastly) it tells you
+   right away that you'd only be fuzzing the proxy — and lets you abort instead
+   of wasting time.
+3. **Wordlist** — give a path (it's validated) or press Enter for a sensible
+   default (SecLists/dirb). Either way it **auto-adapts** the list for ffuf:
+   drops comments/blank lines, strips leading `/`, and de-duplicates.
+4. **Rate limit & firewall bypass** — set them, or accept the defaults; the
+   bypass option adds a realistic User-Agent, a random per-request delay, and a
+   rate cap.
+5. It prints the exact `ffuf` command, then runs it.
+
+---
+
 ## 1. Two ways to give payloads
 
 ### A) Built-in payloads (nothing to download) — `patt:`

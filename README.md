@@ -41,6 +41,7 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 🌐 **Subdomain enum (`subs`)** | passive OSINT (crt.sh, certspotter, hackertarget) maps `*.domain` wildcard scopes — no amass/subfinder needed |
 | 🧠 **JS-bundle intel** | mines SPA JS for hidden routes, API endpoints, backends (Supabase/Firebase/S3) & leaked keys — no headless browser |
 | ⚡ **Fast async engine** | uvloop + worker-pool + lazy parsing — ~parity with ffuf under real network latency (see benchmark) |
+| 🧙 **ffuf wizard (`ffuf`)** | menu-driven ffuf — pick a task, it validates & auto-adapts your wordlist, asks rate/WAF-bypass, and **warns instantly if the target is behind Cloudflare** (so you don't fuzz the edge) |
 | 🎁 **PayloadsAllTheThings** | 66 payload categories built in (`-w patt:xss`) |
 
 ### 🚀 Beyond ffuf — the five limitations, solved
