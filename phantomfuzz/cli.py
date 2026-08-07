@@ -280,6 +280,12 @@ def build_parser():
     sd.add_argument("-o", "--output", metavar="FILE", help="write host list")
     sd.add_argument("--no-color", action="store_true")
 
+    # ---------------- ffuf (interactive wizard) ----------------
+    fz = sub.add_parser("ffuf",
+                        help="interactive ffuf wizard (menu-driven, auto-adapts "
+                             "your wordlist, warns on Cloudflare)")
+    fz.add_argument("--no-color", action="store_true")
+
     # ---------------- payloads (PayloadsAllTheThings) ----------------
     pl = sub.add_parser("payloads", help="manage PayloadsAllTheThings payload sets")
     pl.add_argument("--list", action="store_true", help="list categories & aliases")
@@ -1111,6 +1117,13 @@ def _run_payloads(args):
     return 0
 
 
+def _run_ffuf(args):
+    if args.no_color:
+        C.strip()
+    from . import ffuf_wizard
+    return ffuf_wizard.run_wizard()
+
+
 def _run_subs(args):
     if args.no_color or (args.output and not sys.stdout.isatty()):
         C.strip()
@@ -1212,7 +1225,7 @@ def run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
     known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",
-             "auto", "subs", "-h", "--help", "-V", "--version"}
+             "auto", "subs", "ffuf", "-h", "--help", "-V", "--version"}
     if argv and argv[0] not in known:
         argv = ["web"] + argv
     args = build_parser().parse_args(argv)
@@ -1221,7 +1234,7 @@ def run(argv=None):
         "web": _run_web, "net": _run_net, "idor": _run_idor,
         "race": _run_race, "tamper": _run_tamper,
         "crawl": _run_crawl, "payloads": _run_payloads, "auto": _run_auto,
-        "subs": _run_subs,
+        "subs": _run_subs, "ffuf": _run_ffuf,
     }
     handler = dispatch.get(args.command)
     if handler:
