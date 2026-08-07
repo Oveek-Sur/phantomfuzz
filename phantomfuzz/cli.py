@@ -326,6 +326,18 @@ def build_parser():
     au.add_argument("--allow-offsite", action="store_true",
                     help="DANGER: also test discovered off-scope hosts "
                          "(only if your authorization covers them)")
+    au.add_argument("--evade", action="store_true",
+                    help="WAF-evasion suite: adaptive back-off + UA rotation + "
+                         "jitter + payload-encoding retries on block")
+    au.add_argument("--jitter", type=float, default=0.0, metavar="SEC",
+                    help="random 0..SEC delay before each request")
+    au.add_argument("--rate", type=float, default=0, metavar="RPS",
+                    help="cap requests/second (0 = unlimited)")
+    au.add_argument("--random-agent", action="store_true",
+                    help="rotate real-browser User-Agents")
+    au.add_argument("-v", "--live", action="store_true",
+                    help="stream EVERY request live (see exactly what it sends "
+                         "and how the target responds)")
     add_auth(au)
     return p
 
@@ -926,8 +938,29 @@ def _run_auto(args):
     from . import attacklib
     njobs = sum(len(attacklib.select_categories(mode, k))
                 for t in atk_targets for k in t["params"])
-    print(f"\n{C.BOLD}[3/3] Attacking{C.RESET} {C.DIM}(mode={mode}, "
-          f"{njobs} param×attack jobs — live status every 3s):{C.RESET}\n")
+    # evasion: --evade turns on the whole suite; individual flags also work
+    evade = args.evade
+    jitter = args.jitter or (0.3 if evade else 0.0)
+    rate = args.rate
+    random_agent = args.random_agent or evade
+    adaptive = evade
+    encode = evade
+    ev_on = "on" if evade else "off"
+    print(f"\n{C.BOLD}[3/3] Attacking{C.RESET} {C.DIM}(mode={mode}, {njobs} "
+          f"param×attack jobs · evasion={ev_on} · live status every 3s"
+          f"{' · per-request stream' if args.live else ''}):{C.RESET}\n")
+
+    _CLS = {"ok": (C.GREEN, "OK"), "waf": (C.RED, "WAF-BLOCK"),
+            "ratelimit": (C.YELLOW, "429"), "timeout": (C.MAGENTA, "TIMEOUT"),
+            "server": (C.YELLOW, "5xx")}
+
+    def on_event(e):
+        col, tag = _CLS.get(e["cls"], (C.DIM, e["cls"]))
+        pl = e["payload"][:38].replace("\n", " ")
+        print(f"  {col}{e['status']:>3}{C.RESET} {e['method']:<4} "
+              f"{e['host']} {C.DIM}[{e['param']}]{C.RESET} "
+              f"{attacklib.EMOJI.get(e['cat'],'')}{e['cat']:<9} "
+              f"{C.DIM}«{pl}»{C.RESET} {e['ms']:>4.0f}ms {col}{tag}{C.RESET}")
 
     def on_status(st):
         pct = (st["done"] / st["total"] * 100) if st["total"] else 100
@@ -936,11 +969,19 @@ def _run_auto(args):
               f"{st['done']}/{st['total']}  "
               f"{C.GREEN}⚑{st['findings']}{C.RESET}  "
               f"{C.DIM}now: {st['cur']}{C.RESET}")
+        diag = st.get("diag", "")
+        if diag:
+            dcol = C.RED if ("WAF" in diag or "rate-limited" in diag
+                             or "timeouts" in diag) else C.DIM
+            print(f"       {dcol}ⓘ {diag}{C.RESET}")
 
     findings = asyncio.run(auto.attack_targets(
         atk_targets, choice=mode, cookies=cookies, headers=headers,
         verify_ssl=not args.insecure, timeout=args.timeout,
-        concurrency=args.threads, on_status=on_status, status_interval=3.0))
+        concurrency=args.threads, on_status=on_status, status_interval=3.0,
+        jitter=jitter, rate=rate, random_agent=random_agent,
+        adaptive=adaptive, encode=encode,
+        on_event=on_event if args.live else None))
 
     # ---- FINAL RESULT ----
     print(f"\n{C.MAGENTA}{'═'*60}{C.RESET}")

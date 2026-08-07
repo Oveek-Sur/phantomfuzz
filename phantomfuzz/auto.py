@@ -76,11 +76,12 @@ async def _mk_session(cookies, headers, verify_ssl, timeout):
     return s
 
 
-async def _send(session, method, url, data=None):
+async def _send(session, method, url, data=None, headers=None):
     """One request (GET or POST body). Returns a normalized Response."""
     start = time.monotonic()
     try:
         async with session.request(method, url, data=data,
+                                   headers=headers or None,
                                    allow_redirects=False) as r:
             body = await r.read()
             return Response({}, url, r.status, body,
@@ -301,16 +302,28 @@ async def test_targets(targets, cookies=None, headers=None, verify_ssl=False,
 
 async def attack_targets(targets, choice="context", cookies=None, headers=None,
                          verify_ssl=False, timeout=15, concurrency=10,
-                         on_status=None, status_interval=3.0):
+                         on_status=None, status_interval=3.0,
+                         jitter=0.0, rate=0, random_agent=False, adaptive=False,
+                         encode=False, on_event=None):
     """Fire the chosen attack category(ies) at every param, with a heartbeat.
 
     `choice` is one of attacklib.CATEGORIES, or "context" (pick per param) or
     "all" (run every category). For each (url, param, category) it walks that
-    category's payloads and stops at the first confirmed hit. Every
-    `status_interval` seconds it calls on_status(status_dict) so the CLI can
-    show what it's doing. Returns findings: (url, key, cat, payload, resp, why).
+    category's payloads and stops at the first confirmed hit.
+
+    Evasion (all optional): `jitter` random delay, `rate` req/s cap,
+    `random_agent` UA rotation, `adaptive` back-off when blocking is detected,
+    and `encode` — retry a blocked payload with WAF-bypass encodings.
+
+    `on_status(status)` fires every `status_interval`s (status carries a live
+    block `diagnosis`); `on_event(ev)` fires per request so the CLI can stream a
+    live log of exactly what's being sent and how the target responds. Returns
+    findings: (url, key, cat, payload, resp, why).
     """
     from . import attacklib
+    from .evasion import EvasionState, classify, encode_variants
+    ev = EvasionState(jitter=jitter, rate=rate, random_agent=random_agent,
+                      adaptive=adaptive)
     findings = []
     # accept both the unified dicts and the legacy (url, names) tuples
     norm = []
@@ -331,19 +344,39 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
         return findings
 
     status = {"done": 0, "total": len(jobs), "findings": 0,
-              "cur": "starting…", "bycat": {}}
+              "cur": "starting…", "bycat": {}, "diag": "warming up…",
+              "counts": {}}
     sem = asyncio.Semaphore(concurrency)
     baselines = {}
     baseline_locks = {}
     stop = asyncio.Event()
 
-    async def probe(s, t, key, value):
-        """Send one request with `key` set to `value` (query or POST body)."""
+    async def send_probe(s, t, key, value, cat):
+        """One evasion-aware request; classifies, records, streams an event."""
+        await ev.before(time.monotonic)
         if t["in_body"]:
             data = {p: "1" for p in t["params"]}
             data[key] = value
-            return await _send(s, t["method"], t["url"], data=data)
-        return await _send(s, "GET", _set_param(t["url"], key, value))
+            r = await _send(s, t["method"], t["url"], data=data,
+                            headers=ev.headers())
+            method = t["method"]
+        else:
+            r = await _send(s, "GET", _set_param(t["url"], key, value),
+                            headers=ev.headers())
+            method = "GET"
+        cls = classify(r)
+        ev.record(cls)
+        if on_event:
+            on_event({"status": r.status, "method": method,
+                      "host": urlsplit(t["url"]).netloc, "param": key,
+                      "cat": cat, "payload": value, "ms": r.elapsed_ms,
+                      "cls": cls})
+        return r, cls
+
+    def _record_finding(t, key, cat, pl, r, why):
+        findings.append((t["url"], key, cat, pl, r, why))
+        status["findings"] += 1
+        status["bycat"][cat] = status["bycat"].get(cat, 0) + 1
 
     async with await _mk_session(cookies, headers, verify_ssl, timeout) as s:
         async def baseline_for(ti):
@@ -354,10 +387,12 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
                         t = norm[ti]
                         if t["in_body"]:
                             data = {p: "1" for p in t["params"]}
-                            baselines[ti] = await _send(s, t["method"],
-                                                        t["url"], data=data)
+                            baselines[ti] = await _send(s, t["method"], t["url"],
+                                                        data=data,
+                                                        headers=ev.headers())
                         else:
-                            baselines[ti] = await _get(s, t["url"])
+                            baselines[ti] = await _send(s, "GET", t["url"],
+                                                        headers=ev.headers())
             return baselines[ti]
 
         async def do(ti, key, cat):
@@ -369,13 +404,24 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
                 status["cur"] = (f"{attacklib.EMOJI.get(cat, '')} {cat} "
                                  f"-> {verb} {host} [{key}]")
                 for pl in attacklib.load(cat):
-                    r = await probe(s, t, key, pl)
+                    r, cls = await send_probe(s, t, key, pl, cat)
                     hit, why = attacklib.detect(cat, pl, r, base)
                     if hit:
-                        findings.append((t["url"], key, cat, pl, r, why))
-                        status["findings"] += 1
-                        status["bycat"][cat] = status["bycat"].get(cat, 0) + 1
+                        _record_finding(t, key, cat, pl, r, why)
                         break
+                    # blocked by a WAF? try encoded variants to slip past it
+                    if encode and cls == "waf":
+                        done_hit = False
+                        for enc in encode_variants(pl):
+                            r2, _ = await send_probe(s, t, key, enc, cat)
+                            hit2, why2 = attacklib.detect(cat, enc, r2, base)
+                            if hit2:
+                                _record_finding(t, key, cat, enc, r2,
+                                                why2 + " [WAF-bypass encoding]")
+                                done_hit = True
+                                break
+                        if done_hit:
+                            break
             status["done"] += 1
 
         async def heartbeat():
@@ -384,6 +430,8 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
                     await asyncio.wait_for(stop.wait(), timeout=status_interval)
                 except asyncio.TimeoutError:
                     if on_status:
+                        status["diag"] = ev.diagnosis()
+                        status["counts"] = dict(ev.counts)
                         on_status(dict(status))
 
         hb = asyncio.create_task(heartbeat())
@@ -393,5 +441,7 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
             stop.set()
             await hb
         if on_status:
+            status["diag"] = ev.diagnosis()
+            status["counts"] = dict(ev.counts)
             on_status(dict(status))          # final tick
     return findings
