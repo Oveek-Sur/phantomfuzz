@@ -1025,6 +1025,12 @@ def _run_net(args):
 
 
 def run(argv=None):
+    # swap in uvloop early (before any asyncio.run) for a big throughput win
+    try:
+        from .http_client import install_fast_loop
+        install_fast_loop()
+    except Exception:
+        pass
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
     known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",

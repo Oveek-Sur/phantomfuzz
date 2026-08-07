@@ -18,6 +18,18 @@ try:
 except ImportError:  # graceful fallback
     HAVE_AIOHTTP = False
 
+
+def install_fast_loop():
+    """Swap in uvloop when available — a big asyncio throughput win on
+    Linux/macOS. Must be called before the event loop is created. No-op (and
+    harmless) on Windows or when uvloop isn't installed."""
+    try:
+        import uvloop
+        uvloop.install()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
 # A small pool of real-browser UA strings for rotation.
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
@@ -29,25 +41,51 @@ USER_AGENTS = [
 
 
 class Response:
-    """Normalized response used everywhere downstream."""
+    """Normalized response used everywhere downstream.
 
-    __slots__ = ("payload", "url", "status", "size", "words", "lines",
-                 "elapsed_ms", "body_text", "redirect", "error", "waf")
+    Hot-path optimization: `size` is computed eagerly (cheap, and almost every
+    filter needs it) but `body_text`, `words` and `lines` are computed *lazily*
+    on first access and cached. A plain `-mc 200` run therefore never decodes or
+    tokenizes the 99% of bodies that don't match — that was the single biggest
+    per-request CPU cost.
+    """
+
+    __slots__ = ("payload", "url", "status", "size", "elapsed_ms", "redirect",
+                 "error", "waf", "_body", "_text", "_words", "_lines")
 
     def __init__(self, payload, url, status=0, body=b"", elapsed_ms=0.0,
                  redirect=None, error=None):
         self.payload = payload
         self.url = url
         self.status = status
-        self.size = len(body)
-        text = body.decode("utf-8", "ignore") if isinstance(body, bytes) else str(body)
-        self.body_text = text
-        self.words = len(text.split())
-        self.lines = text.count("\n")
+        self._body = body if isinstance(body, (bytes, bytearray)) \
+            else str(body).encode("utf-8", "ignore")
+        self.size = len(self._body)
         self.elapsed_ms = elapsed_ms
         self.redirect = redirect
         self.error = error
         self.waf = False
+        self._text = None
+        self._words = None
+        self._lines = None
+
+    @property
+    def body_text(self):
+        if self._text is None:
+            self._text = bytes(self._body).decode("utf-8", "ignore")
+        return self._text
+
+    @property
+    def words(self):
+        if self._words is None:
+            self._words = len(self.body_text.split())
+        return self._words
+
+    @property
+    def lines(self):
+        if self._lines is None:
+            self._lines = self.body_text.count("\n")
+        return self._lines
 
     @property
     def ok(self):
@@ -159,11 +197,16 @@ class AsyncFetcher:
         return Response(payload, req["url"], 0, b"", 0.0, error=str(last_err))
 
     async def run(self, requests_iter, on_result):
-        sem = asyncio.Semaphore(self.concurrency)
+        # Fixed worker-pool pulling from a bounded queue. Cheaper than creating
+        # one task per request (+ a semaphore) and it streams the wordlist, so
+        # memory stays flat on multi-million-word lists instead of building a
+        # giant task list up front.
         connector = aiohttp.TCPConnector(
-            limit=self.concurrency * 2, ssl=self.verify_ssl, ttl_dns_cache=300)
+            limit=self.concurrency * 2, ssl=self.verify_ssl,
+            ttl_dns_cache=300, keepalive_timeout=30, enable_cleanup_closed=True)
         timeout = aiohttp.ClientTimeout(total=self.timeout)
         jar = aiohttp.CookieJar(unsafe=True)
+        q = asyncio.Queue(maxsize=self.concurrency * 4)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout,
                                          cookie_jar=jar) as session:
@@ -174,17 +217,23 @@ class AsyncFetcher:
                 except Exception:
                     pass
 
-            async def guarded(req, payload):
-                async with sem:
-                    resp = await self._one(session, req, payload)
-                    on_result(resp)
+            async def worker():
+                while True:
+                    item = await q.get()
+                    try:
+                        if item is None:
+                            return
+                        req, payload = item
+                        resp = await self._one(session, req, payload)
+                        on_result(resp)
+                    finally:
+                        q.task_done()
 
-            tasks = []
+            workers = [asyncio.create_task(worker())
+                       for _ in range(self.concurrency)]
             for req, payload in requests_iter:
-                tasks.append(asyncio.create_task(guarded(req, payload)))
-                if len(tasks) >= self.concurrency * 50:
-                    done, pending = await asyncio.wait(
-                        tasks, return_when=asyncio.FIRST_COMPLETED)
-                    tasks = list(pending)
-            if tasks:
-                await asyncio.gather(*tasks)
+                await q.put((req, payload))
+            for _ in workers:            # one sentinel per worker to stop it
+                await q.put(None)
+            await q.join()
+            await asyncio.gather(*workers, return_exceptions=True)
