@@ -51,7 +51,7 @@ class Response:
     """
 
     __slots__ = ("payload", "url", "status", "size", "elapsed_ms", "redirect",
-                 "error", "waf", "_body", "_text", "_words", "_lines")
+                 "error", "_body", "_text", "_words", "_lines", "_waf")
 
     def __init__(self, payload, url, status=0, body=b"", elapsed_ms=0.0,
                  redirect=None, error=None):
@@ -64,10 +64,10 @@ class Response:
         self.elapsed_ms = elapsed_ms
         self.redirect = redirect
         self.error = error
-        self.waf = False
         self._text = None
         self._words = None
         self._lines = None
+        self._waf = None
 
     @property
     def body_text(self):
@@ -86,6 +86,19 @@ class Response:
         if self._lines is None:
             self._lines = self.body_text.count("\n")
         return self._lines
+
+    @property
+    def waf(self):
+        # WAF fingerprinting reads the body, so compute it lazily too — a plain
+        # run only needs it for the handful of results it actually shows, and
+        # adaptive back-off calls looks_like_waf() directly on the monitor path.
+        if self._waf is None:
+            self._waf = looks_like_waf(self)
+        return self._waf
+
+    @waf.setter
+    def waf(self, value):
+        self._waf = value
 
     @property
     def ok(self):
@@ -187,8 +200,10 @@ class AsyncFetcher:
                     elapsed = (time.monotonic() - start) * 1000
                     resp = Response(payload, req["url"], r.status, body,
                                     elapsed, r.headers.get("Location"))
-                    resp.waf = looks_like_waf(resp)
-                    await self._register_block(resp)
+                    # WAF flag is now lazy (see Response.waf); only the adaptive
+                    # monitor needs it eagerly, and that path handles it itself.
+                    if self.adaptive:
+                        await self._register_block(resp)
                     return resp
             except Exception as e:  # noqa: BLE001
                 last_err = e
