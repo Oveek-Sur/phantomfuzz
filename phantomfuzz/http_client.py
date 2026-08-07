@@ -150,6 +150,9 @@ class AsyncFetcher:
         self._backoff_lock = asyncio.Lock()
 
     async def _throttle(self):
+        # fast path: nothing to throttle (the common default) — skip all work
+        if not (self.rate or self.delay or self.jitter or self._extra_delay):
+            return
         # fixed rate limit
         if self.rate:
             async with self._rate_lock:
