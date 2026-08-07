@@ -1209,6 +1209,59 @@ def _run_net(args):
     return 0
 
 
+def _interactive_menu():
+    """Top-level menu shown when you just run `phantomfuzz` with no arguments —
+    so you never have to memorize a subcommand. Each choice dispatches to the
+    right command for you."""
+    show(__version__)
+    print(f"{C.BOLD}What do you want to do?{C.RESET}  "
+          f"{C.DIM}(no commands to memorize){C.RESET}")
+    opts = [
+        ("🗺️", "Map a site's attack surface",
+         "pages, params, forms, APIs, backends, hidden routes"),
+        ("🌐", "Find subdomains", "wildcard *.domain scope, passive OSINT"),
+        ("⚔️", "Attack a site", "auto console — then pick the attack type"),
+        ("🧙", "ffuf wizard", "menu-driven ffuf (checks it's installed)"),
+        ("📖", "Show the full command help", ""),
+    ]
+    for i, (e, t, h) in enumerate(opts, 1):
+        line = f"  {C.CYAN}{i}{C.RESET}) {e}  {C.BOLD}{t}{C.RESET}"
+        if h:
+            line += f"  {C.DIM}— {h}{C.RESET}"
+        print(line)
+    try:
+        c = input(f"{C.BOLD}choice [1-5]: {C.RESET}").strip()
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return 0
+
+    def ask(p):
+        try:
+            return input(p).strip()
+        except (KeyboardInterrupt, EOFError):
+            return ""
+
+    if c == "1":
+        u = ask("Target URL (e.g. https://example.com): ")
+        return run(["auto", "-u", u, "--discover-only"]) if u else 0
+    if c == "2":
+        d = ask("Domain (e.g. example.com): ")
+        if not d:
+            return 0
+        probe = ask("Probe which subdomains are live? [Y/n]: ").lower()
+        argv = ["subs", "-u", d]
+        if probe in ("", "y", "yes"):
+            argv += ["--probe", "--live-only"]
+        return run(argv)
+    if c == "3":
+        u = ask("Target URL (e.g. https://example.com): ")
+        return run(["auto", "-u", u]) if u else 0
+    if c == "4":
+        return run(["ffuf"])
+    build_parser().print_help()
+    return 0
+
+
 def run(argv=None):
     # keep emoji/unicode banners from crashing a cp1252 Windows console
     for stream in (sys.stdout, sys.stderr):
@@ -1223,6 +1276,9 @@ def run(argv=None):
     except Exception:
         pass
     argv = list(sys.argv[1:] if argv is None else argv)
+    # no args on a real terminal → friendly menu (no command to memorize)
+    if not argv and sys.stdin.isatty() and sys.stdout.isatty():
+        return _interactive_menu()
     # backward compat: default to 'web' when no subcommand is given
     known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",
              "auto", "subs", "ffuf", "-h", "--help", "-V", "--version"}
