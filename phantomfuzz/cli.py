@@ -260,6 +260,26 @@ def build_parser():
     c.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
     add_auth(c)
 
+    # ---------------- subs (passive subdomain enumeration) ----------------
+    sd = sub.add_parser(
+        "subs", help="passive subdomain enumeration for wildcard scopes",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="  phantomfuzz subs -u example.com            # list subdomains (passive)\n"
+               "  phantomfuzz subs -u example.com --probe    # + check which are live\n"
+               "  phantomfuzz subs -u example.com -o subs.txt")
+    sd.add_argument("-u", "--url", required=True, metavar="DOMAIN",
+                    help="apex domain (URL or bare host)")
+    sd.add_argument("--probe", action="store_true",
+                    help="probe which hosts are live over HTTP(S) (sends traffic!)")
+    sd.add_argument("--live-only", action="store_true",
+                    help="with --probe, only output hosts that responded")
+    sd.add_argument("-t", "--threads", type=int, default=30,
+                    help="probe concurrency (default 30)")
+    sd.add_argument("--timeout", type=float, default=45,
+                    help="OSINT source timeout (default 45s; crt.sh is slow)")
+    sd.add_argument("-o", "--output", metavar="FILE", help="write host list")
+    sd.add_argument("--no-color", action="store_true")
+
     # ---------------- payloads (PayloadsAllTheThings) ----------------
     pl = sub.add_parser("payloads", help="manage PayloadsAllTheThings payload sets")
     pl.add_argument("--list", action="store_true", help="list categories & aliases")
@@ -896,6 +916,53 @@ def _run_payloads(args):
     return 0
 
 
+def _run_subs(args):
+    if args.no_color or (args.output and not sys.stdout.isatty()):
+        C.strip()
+    show(__version__, quiet=False)
+    from . import subdomains
+    domain = subdomains.normalise_domain(args.url)
+    print(f"{C.CYAN}[1/2]{C.RESET} passive OSINT for {C.BOLD}*.{domain}{C.RESET} "
+          f"{C.DIM}(no traffic to target)…{C.RESET}")
+
+    def log(m):
+        print(f"      {C.DIM}{m}{C.RESET}")
+
+    subs = asyncio.run(subdomains.passive(domain, timeout=args.timeout, on_log=log))
+    subs = sorted(subs)
+    print(f"{C.GREEN}found{C.RESET} {C.BOLD}{len(subs)}{C.RESET} unique subdomains")
+
+    rows = subs
+    if args.probe:
+        if not subs:
+            print(f"{C.DIM}nothing to probe.{C.RESET}")
+        else:
+            print(f"{C.CYAN}[2/2]{C.RESET} probing live hosts "
+                  f"{C.DIM}(one request each — authorized scope only)…{C.RESET}")
+            live = asyncio.run(subdomains.probe_live(
+                subs, timeout=min(args.timeout, 15), concurrency=args.threads))
+            livemap = {h: (u, s) for h, u, s in live}
+            print(f"{C.GREEN}live{C.RESET} {C.BOLD}{len(live)}{C.RESET}/{len(subs)}")
+            for h in subs:
+                if h in livemap:
+                    u, st = livemap[h]
+                    col = C.GREEN if st < 400 else (C.YELLOW if st < 500 else C.RED)
+                    print(f"  {col}{st}{C.RESET}  {u}")
+                elif not args.live_only:
+                    print(f"  {C.DIM}---  {h}{C.RESET}")
+            rows = ([h for h in subs if h in livemap] if args.live_only
+                    else subs)
+    else:
+        for h in subs:
+            print(f"  {h}")
+
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(rows) + ("\n" if rows else ""))
+        print(f"{C.DIM}wrote {len(rows)} host(s) -> {args.output}{C.RESET}")
+    return 0
+
+
 def _run_net(args):
     if args.no_color:
         C.strip()
@@ -938,7 +1005,7 @@ def run(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     # backward compat: default to 'web' when no subcommand is given
     known = {"web", "net", "idor", "race", "tamper", "crawl", "payloads",
-             "auto", "-h", "--help", "-V", "--version"}
+             "auto", "subs", "-h", "--help", "-V", "--version"}
     if argv and argv[0] not in known:
         argv = ["web"] + argv
     args = build_parser().parse_args(argv)
@@ -947,6 +1014,7 @@ def run(argv=None):
         "web": _run_web, "net": _run_net, "idor": _run_idor,
         "race": _run_race, "tamper": _run_tamper,
         "crawl": _run_crawl, "payloads": _run_payloads, "auto": _run_auto,
+        "subs": _run_subs,
     }
     handler = dispatch.get(args.command)
     if handler:

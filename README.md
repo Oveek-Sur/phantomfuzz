@@ -32,6 +32,7 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 📊 **Live UI** | colored results + progress bar, ETA, req/s |
 | 🤖 **Autopilot (`auto`)** | one command: crawl → show the surface → auto-test every param (traversal/XSS/SQLi/redirect), no wordlist needed |
 | 🕷️ **Crawler/spider** | auto-discovers URLs, forms & parameters — no Burp needed |
+| 🌐 **Subdomain enum (`subs`)** | passive OSINT (crt.sh, certspotter, hackertarget) maps `*.domain` wildcard scopes — no amass/subfinder needed |
 | 🧠 **JS-bundle intel** | mines SPA JS for hidden routes, API endpoints, backends (Supabase/Firebase/S3) & leaked keys — no headless browser |
 | 🎁 **PayloadsAllTheThings** | 66 payload categories built in (`-w patt:xss`) |
 
