@@ -129,24 +129,52 @@ async def discover(target, cookies=None, headers=None, verify_ssl=False,
     return result
 
 
-def parameterised_targets(result):
+def registrable_domain(host):
+    """Best-effort eTLD+1 (last two labels) — covers the common .com/.net case.
+
+    Not a full public-suffix parse (misses .co.uk-style TLDs), so callers may
+    pass an explicit scope for those. Good enough to keep a scan from wandering
+    off onto a wholly different company's domain.
+    """
+    host = (host or "").lower().strip().strip(".")
+    host = host.split("@")[-1].split(":")[0]
+    parts = host.split(".")
+    return ".".join(parts[-2:]) if len(parts) >= 2 else host
+
+
+def in_scope(url, scope):
+    """True if url's host equals `scope` or is a subdomain of it."""
+    if not scope:
+        return True
+    host = urlsplit(url).netloc.split("@")[-1].split(":")[0].lower()
+    return host == scope or host.endswith("." + scope)
+
+
+def parameterised_targets(result, scope=None):
     """Build concrete param'd URLs to test from the crawl result.
 
     Returns list of (url, [param names]). Includes crawler-found param URLs and
-    any API endpoints that already carry a query string.
+    any API endpoints that already carry a query string. When `scope` is given
+    (a registrable domain), targets whose host is not that domain / a subdomain
+    of it are dropped — so a discovered off-site link (a third-party login/SSO
+    host, a CDN, an analytics domain) is never sent attack payloads. This is a
+    hard safety gate for authorized testing: you must not probe out-of-scope
+    hosts.
     """
     targets = []
     for base, names in sorted(result.get("params", {}).items()):
         names = list(names)
         q = "&".join(f"{n}=1" for n in names)
-        targets.append((f"{base}?{q}", names))
+        url = f"{base}?{q}"
+        if in_scope(url, scope):
+            targets.append((url, names))
     # API endpoints from JS that already look parameterised
     intel = result.get("js_intel", {})
     for a in intel.get("apis", []):
         if "?" in a and "=" in a:
             base = a.split("?")[0]
             names = [kv.split("=")[0] for kv in urlsplit(a).query.split("&") if kv]
-            if names:
+            if names and in_scope(a, scope):
                 targets.append((a, names))
     return targets
 

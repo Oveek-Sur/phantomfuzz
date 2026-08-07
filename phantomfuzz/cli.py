@@ -312,6 +312,13 @@ def build_parser():
     au.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
     au.add_argument("--yes", action="store_true",
                     help="don't pause between discovery and testing")
+    au.add_argument("--scope", metavar="DOMAIN",
+                    help="registrable domain to keep tests in-scope "
+                         "(default: derived from -u). Off-scope discovered "
+                         "params are shown but never tested.")
+    au.add_argument("--allow-offsite", action="store_true",
+                    help="DANGER: also test discovered off-scope hosts "
+                         "(only if your authorization covers them)")
     add_auth(au)
     return p
 
@@ -755,7 +762,14 @@ def _run_auto(args):
         use_render=args.render, on_log=log, timeout=args.timeout))
 
     intel = result.get("js_intel", {})
-    targets = auto.parameterised_targets(result)
+    # scope gate: only ever *test* hosts within the target's registrable domain
+    # (unless the user explicitly authorizes off-site testing).
+    from urllib.parse import urlsplit as _usplit
+    scope = None if args.allow_offsite else (
+        args.scope or auto.registrable_domain(_usplit(args.url).netloc))
+    all_targets = auto.parameterised_targets(result)          # unfiltered (for display)
+    targets = auto.parameterised_targets(result, scope=scope)  # in-scope only
+    offsite = [t for t in all_targets if t not in targets]
 
     # ---- 2. SHOW ----
     print(f"\n{C.BOLD}[2/3] Discovered surface:{C.RESET}")
@@ -775,11 +789,20 @@ def _run_auto(args):
         print(f"\n  {C.BOLD}Client-side routes:{C.RESET}")
         for r in intel["routes"]:
             print(f"    {C.GREEN}{r}{C.RESET}")
+    if scope:
+        print(f"  scope           : {C.GREEN}*.{scope}{C.RESET}")
     if targets:
         print(f"\n  {C.BOLD}Parameterised targets (will be tested):{C.RESET}")
         for url, names in targets:
             print(f"    {C.CYAN}{url.split('?')[0]}{C.RESET}  "
                   f"{C.DIM}?{'&'.join(names)}{C.RESET}")
+    if offsite:
+        print(f"\n  {C.YELLOW}Off-scope params (shown, NOT tested — "
+              f"outside {scope}):{C.RESET}")
+        for url, names in offsite:
+            print(f"    {C.DIM}{url.split('?')[0]}  ?{'&'.join(names)}{C.RESET}")
+        print(f"    {C.DIM}(use --allow-offsite only if authorized for these)"
+              f"{C.RESET}")
     if intel.get("secrets"):
         print(f"\n  {C.RED}Possible leaked keys/tokens:{C.RESET}")
         for s in intel["secrets"]:
