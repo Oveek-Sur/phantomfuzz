@@ -1,0 +1,6 @@
+# Keep shell scripts and Python LF-only so they run on Linux even when edited
+# from Windows (a CRLF shebang breaks with "bad interpreter: bash^M").
+* text=auto
+*.sh text eol=lf
+*.py text eol=lf
+install.sh text eol=lf
