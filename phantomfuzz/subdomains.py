@@ -79,15 +79,26 @@ async def _get_text(session, url, timeout, retries=2, warm_status=(502, 503, 504
 
 
 async def _crtsh(session, domain, timeout, on_log=None):
-    txt = await _get_text(session, f"https://crt.sh/?q=%25.{domain}&output=json",
-                          timeout, retries=2)
-    if not txt:
+    # crt.sh is the richest CT source but flaky: it 502s on a cold cache and can
+    # even return an empty 200 before the query warms up. Retry the whole GET a
+    # few times with backoff and treat empty/undecodable bodies as retryable.
+    url = f"https://crt.sh/?q=%25.{domain}&output=json"
+    data = None
+    for attempt in range(4):
+        txt = await _get_text(session, url, timeout, retries=1)
+        if txt:
+            try:
+                parsed = json.loads(txt)
+            except Exception:  # noqa: BLE001
+                parsed = None
+            if parsed:
+                data = parsed
+                break
+        if attempt < 3:
+            await asyncio.sleep(4.0 + attempt * 2)  # 4s,6s,8s backoff
+    if not data:
         if on_log:
-            on_log("crt.sh: no data")
-        return set()
-    try:
-        data = json.loads(txt)
-    except Exception:  # noqa: BLE001
+            on_log("crt.sh: no data (source down/rate-limited)")
         return set()
     names = set()
     for row in data:
