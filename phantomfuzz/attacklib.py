@@ -168,8 +168,15 @@ def detect(cat, payload, resp, baseline=None):
     elif cat == "sqli":
         if SQL_ERRORS.search(body):
             return True, "database error surfaced by injection"
+        # time-based blind: the response must be slow *relative to the baseline*,
+        # not just slow in absolute terms — otherwise a WAF that tar-pits/rate-
+        # limits every request (making the baseline slow too) is misread as SQLi.
         if _TIME_RE.search(payload) and resp.elapsed_ms >= 4500:
-            return True, f"time-based blind: response slept {int(resp.elapsed_ms)}ms"
+            base_ms = baseline.elapsed_ms if (baseline and not baseline.error) else 0
+            if base_ms and resp.elapsed_ms >= base_ms * 3:
+                return True, (f"time-based blind: {int(resp.elapsed_ms)}ms vs "
+                              f"{int(base_ms)}ms baseline")
+            # no usable baseline → don't claim it (avoids latency false positives)
         if (baseline and not baseline.error and resp.status >= 500
                 and resp.status != baseline.status):
             return True, f"injection flipped status {baseline.status}->{resp.status}"
