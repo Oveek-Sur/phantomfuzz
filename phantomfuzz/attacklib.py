@@ -134,9 +134,13 @@ SQL_ERRORS = re.compile(
     r"valid MySQL result|SQLSTATE\[|Warning: mysql|supplied argument is not a "
     r"valid MySQL|Microsoft OLE DB Provider|Incorrect syntax near|"
     r"Syntax error.*in query|SQLServer JDBC Driver)", re.I)
+# Signatures that appear in an actual cloud-metadata RESPONSE body — chosen so
+# they do NOT occur in the SSRF payloads themselves (otherwise a page that
+# merely reflects the payload would false-positive as SSRF).
 META_RE = re.compile(
-    r"(ami-id|instance-id|iam/security-credentials|computeMetadata|"
-    r"meta-data/|local-ipv4|accessKeyId|InstanceProfile)", re.I)
+    r"(ami-id|instance-id|instance-type|local-ipv4|public-ipv4|local-hostname|"
+    r"accessKeyId|SecretAccessKey|InstanceProfileArn|\"Code\"\s*:\s*\"Success\"|"
+    r"security-groups|reservation-id)", re.I)
 _TIME_RE = re.compile(r"(SLEEP\(|WAITFOR|pg_sleep|BENCHMARK\()", re.I)
 _XSS_DANGER = ('"><svg', "><svg/onload", "onerror=alert", "<script>alert",
                "onload=alert", "><img src=x onerror", "ontoggle=alert",
@@ -184,7 +188,9 @@ def detect(cat, payload, resp, baseline=None):
             return True, f"redirects off-site -> {loc}"
 
     elif cat == "ssrf":
-        if META_RE.search(body):
+        # only a hit if the metadata signature is in the RESPONSE but not merely
+        # a reflection of the payload we sent (that would be a false positive).
+        if META_RE.search(body) and not META_RE.search(payload):
             return True, "internal/cloud-metadata content returned (SSRF)"
 
     return False, ""

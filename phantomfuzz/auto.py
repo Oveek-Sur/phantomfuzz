@@ -138,6 +138,9 @@ def registrable_domain(host):
     """
     host = (host or "").lower().strip().strip(".")
     host = host.split("@")[-1].split(":")[0]
+    # IPv4 / IPv6 literals have no registrable domain — scope is the exact host
+    if re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", host) or ":" in host:
+        return host
     parts = host.split(".")
     return ".".join(parts[-2:]) if len(parts) >= 2 else host
 
