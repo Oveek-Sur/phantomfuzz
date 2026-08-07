@@ -848,6 +848,9 @@ def _run_auto(args):
     all_targets = auto.parameterised_targets(result)          # unfiltered (for display)
     targets = auto.parameterised_targets(result, scope=scope)  # in-scope only
     offsite = [t for t in all_targets if t not in targets]
+    # unified attack set: in-scope GET params + POST <form> inputs
+    atk_targets = auto.build_targets(result, scope=scope)
+    form_targets = [t for t in atk_targets if t.get("in_body")]
 
     # ---- 2. SHOW ----
     print(f"\n{C.BOLD}[2/3] Discovered surface:{C.RESET}")
@@ -874,6 +877,11 @@ def _run_auto(args):
         for url, names in targets:
             print(f"    {C.CYAN}{url.split('?')[0]}{C.RESET}  "
                   f"{C.DIM}?{'&'.join(names)}{C.RESET}")
+    if form_targets:
+        print(f"\n  {C.BOLD}POST form inputs (will be tested):{C.RESET}")
+        for t in form_targets:
+            print(f"    {C.MAGENTA}{t['url'].split('?')[0]}{C.RESET}  "
+                  f"{C.DIM}[POST] {'&'.join(t['params'])}{C.RESET}")
     if offsite:
         print(f"\n  {C.YELLOW}Off-scope params (shown, NOT tested — "
               f"outside {scope}):{C.RESET}")
@@ -900,7 +908,7 @@ def _run_auto(args):
     if args.wordlist:
         return _auto_fuzz_with_wordlist(args, targets, cookies, headers)
 
-    if not targets:
+    if not atk_targets:
         print(f"\n{C.YELLOW}No parameterised endpoints to auto-test.{C.RESET} "
               f"Try --render, or fuzz a route with: phantomfuzz web -u "
               f"{args.url.rstrip('/')}/FUZZ -w wordlists/common.txt --smart")
@@ -910,13 +918,14 @@ def _run_auto(args):
     if not args.yes and sys.stdin.isatty():
         try:
             input(f"\n{C.BOLD}[3/3] Press Enter to launch {C.MAGENTA}{mode}{C.RESET}"
-                  f"{C.BOLD} on {len(targets)} endpoint(s) (Ctrl-C to stop)…{C.RESET} ")
+                  f"{C.BOLD} on {len(atk_targets)} endpoint(s), "
+                  f"{len(form_targets)} form(s) (Ctrl-C to stop)…{C.RESET} ")
         except (KeyboardInterrupt, EOFError):
             print("\nstopped.")
             return 0
     from . import attacklib
     njobs = sum(len(attacklib.select_categories(mode, k))
-                for _, names in targets for k in names)
+                for t in atk_targets for k in t["params"])
     print(f"\n{C.BOLD}[3/3] Attacking{C.RESET} {C.DIM}(mode={mode}, "
           f"{njobs} param×attack jobs — live status every 3s):{C.RESET}\n")
 
@@ -929,7 +938,7 @@ def _run_auto(args):
               f"{C.DIM}now: {st['cur']}{C.RESET}")
 
     findings = asyncio.run(auto.attack_targets(
-        targets, choice=mode, cookies=cookies, headers=headers,
+        atk_targets, choice=mode, cookies=cookies, headers=headers,
         verify_ssl=not args.insecure, timeout=args.timeout,
         concurrency=args.threads, on_status=on_status, status_interval=3.0))
 

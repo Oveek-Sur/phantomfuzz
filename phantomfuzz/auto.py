@@ -76,16 +76,22 @@ async def _mk_session(cookies, headers, verify_ssl, timeout):
     return s
 
 
-async def _get(session, url):
+async def _send(session, method, url, data=None):
+    """One request (GET or POST body). Returns a normalized Response."""
     start = time.monotonic()
     try:
-        async with session.get(url, allow_redirects=False) as r:
+        async with session.request(method, url, data=data,
+                                   allow_redirects=False) as r:
             body = await r.read()
             return Response({}, url, r.status, body,
                             (time.monotonic() - start) * 1000,
                             r.headers.get("Location"))
     except Exception as e:  # noqa: BLE001
         return Response({}, url, 0, b"", 0.0, error=str(e))
+
+
+async def _get(session, url):
+    return await _send(session, "GET", url)
 
 
 def _set_param(url, key, value):
@@ -179,6 +185,36 @@ def parameterised_targets(result, scope=None):
             names = [kv.split("=")[0] for kv in urlsplit(a).query.split("&") if kv]
             if names and in_scope(a, scope):
                 targets.append((a, names))
+    return targets
+
+
+def build_targets(result, scope=None):
+    """Unified attack targets: GET query params AND POST <form> inputs.
+
+    Returns dicts: {url, method, params:[names], in_body:bool}. This is what
+    lets the console fuzz real form inputs (search boxes, contact/login forms)
+    — not just URLs that already carry a query string. Off-scope targets are
+    dropped by the same scope gate as parameterised_targets().
+    """
+    targets = []
+    for url, names in parameterised_targets(result, scope=scope):
+        targets.append({"url": url, "method": "GET",
+                        "params": names, "in_body": False})
+    seen = {(t["url"].split("?")[0], t["method"]) for t in targets}
+    for form in result.get("forms", []):
+        action = form.get("action", "")
+        method = (form.get("method") or "GET").upper()
+        inputs = [i for i in (form.get("inputs") or []) if i]
+        if not inputs or not action.startswith("http") or not in_scope(action, scope):
+            continue
+        if (action.split("?")[0], method) in seen:
+            continue
+        # GET forms are already folded into params by the crawler; POST forms
+        # are the new surface — inject payloads into the request body.
+        if method == "POST":
+            targets.append({"url": action, "method": "POST",
+                            "params": sorted(set(inputs)), "in_body": True})
+            seen.add((action.split("?")[0], method))
     return targets
 
 
@@ -276,11 +312,21 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
     """
     from . import attacklib
     findings = []
+    # accept both the unified dicts and the legacy (url, names) tuples
+    norm = []
+    for t in targets:
+        if isinstance(t, dict):
+            norm.append(t)
+        else:
+            url, names = t
+            norm.append({"url": url, "method": "GET",
+                         "params": list(names), "in_body": False})
+
     jobs = []
-    for url, names in targets:
-        for key in names:
+    for ti, t in enumerate(norm):
+        for key in t["params"]:
             for cat in attacklib.select_categories(choice, key):
-                jobs.append((url, key, cat))
+                jobs.append((ti, key, cat))
     if not jobs:
         return findings
 
@@ -291,27 +337,42 @@ async def attack_targets(targets, choice="context", cookies=None, headers=None,
     baseline_locks = {}
     stop = asyncio.Event()
 
-    async with await _mk_session(cookies, headers, verify_ssl, timeout) as s:
-        async def baseline_for(url, key):
-            bk = (url, key)
-            if bk not in baselines:
-                lk = baseline_locks.setdefault(bk, asyncio.Lock())
-                async with lk:
-                    if bk not in baselines:
-                        baselines[bk] = await _get(s, _set_param(url, key, "1"))
-            return baselines[bk]
+    async def probe(s, t, key, value):
+        """Send one request with `key` set to `value` (query or POST body)."""
+        if t["in_body"]:
+            data = {p: "1" for p in t["params"]}
+            data[key] = value
+            return await _send(s, t["method"], t["url"], data=data)
+        return await _send(s, "GET", _set_param(t["url"], key, value))
 
-        async def do(url, key, cat):
+    async with await _mk_session(cookies, headers, verify_ssl, timeout) as s:
+        async def baseline_for(ti):
+            if ti not in baselines:
+                lk = baseline_locks.setdefault(ti, asyncio.Lock())
+                async with lk:
+                    if ti not in baselines:
+                        t = norm[ti]
+                        if t["in_body"]:
+                            data = {p: "1" for p in t["params"]}
+                            baselines[ti] = await _send(s, t["method"],
+                                                        t["url"], data=data)
+                        else:
+                            baselines[ti] = await _get(s, t["url"])
+            return baselines[ti]
+
+        async def do(ti, key, cat):
+            t = norm[ti]
             async with sem:
-                base = await baseline_for(url, key)
-                host = urlsplit(url).netloc
+                base = await baseline_for(ti)
+                host = urlsplit(t["url"]).netloc
+                verb = "POST" if t["in_body"] else "GET"
                 status["cur"] = (f"{attacklib.EMOJI.get(cat, '')} {cat} "
-                                 f"-> {host} ?{key}")
+                                 f"-> {verb} {host} [{key}]")
                 for pl in attacklib.load(cat):
-                    r = await _get(s, _set_param(url, key, pl))
+                    r = await probe(s, t, key, pl)
                     hit, why = attacklib.detect(cat, pl, r, base)
                     if hit:
-                        findings.append((url, key, cat, pl, r, why))
+                        findings.append((t["url"], key, cat, pl, r, why))
                         status["findings"] += 1
                         status["bycat"][cat] = status["bycat"].get(cat, 0) + 1
                         break
