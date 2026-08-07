@@ -79,23 +79,31 @@ difference is small; the feature breadth is the point.
 
 ---
 
-## 📦 Installation
+## 📦 Installation (Kali / Debian / Ubuntu)
 
-### From source (recommended while developing)
+📖 **Full step-by-step guide with troubleshooting: [INSTALL.md](INSTALL.md)**
+
 ```bash
-git clone https://github.com/YOURNAME/phantomfuzz
+git clone --recursive https://github.com/Oveek-Sur/phantomfuzz
 cd phantomfuzz
-pip install -r requirements.txt      # installs aiohttp
+python3 -m venv .venv && source .venv/bin/activate   # venv is required on Kali
+pip install -r requirements.txt
 python -m phantomfuzz --help
 ```
 
-### As an installed command
+Or the one-command installer (creates the venv + an optional global `pf`):
 ```bash
-pip install .
-phantomfuzz --help
+git clone --recursive https://github.com/Oveek-Sur/phantomfuzz
+cd phantomfuzz && ./install.sh
 ```
 
-Requires **Python 3.8+**.
+> 🩹 On modern Kali `pip install` outside a venv errors with
+> `externally-managed-environment` — the venv above avoids it (or use
+> `pipx install git+https://github.com/Oveek-Sur/phantomfuzz`). See
+> [INSTALL.md](INSTALL.md).
+
+Requires **Python 3.8+**. `--recursive` pulls the PayloadsAllTheThings payload
+set (a git submodule).
 
 ---
 
