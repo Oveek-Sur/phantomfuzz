@@ -1,16 +1,53 @@
 # 👻 PhantomFuzz
 
-**A fast, async, feature-rich web fuzzer for authorized security testing.**
+**A fast, async attack-surface mapper + fuzzer for authorized security testing —
+menu-driven, so there are no commands to memorize.**
 
-PhantomFuzz is a modern alternative to tools like `ffuf` / `wfuzz`, written in
-pure Python with an `asyncio` + `aiohttp` engine. Give it a target and a
-wordlist — it does the rest. It supports directory/endpoint discovery,
-parameter and POST-body fuzzing, multi-position attacks, recursion,
-auto-calibration, rich matchers/filters, and multiple export formats.
+Point it at a site and it maps the surface for you (pages, parameters, forms,
+API endpoints, backends, hidden routes, subdomains), then — if you want — attacks
+what it found with the right payloads. Built in pure Python (`asyncio` +
+`aiohttp`). It bundles the recon and attack steps you'd normally chain from
+5 different tools into one, with an interactive menu up front.
 
 > ⚠️ **Legal notice:** Use PhantomFuzz **only** against systems you own or are
 > **explicitly authorized** to test. Unauthorized fuzzing/scanning may be
 > illegal. You are responsible for how you use this tool.
+
+---
+
+## 🚀 The easy way — just run it (no flags to memorize)
+
+```bash
+phantomfuzz          # or: pf
+```
+
+You get a menu — pick a number, answer a question or two, done:
+
+```
+What do you want to do?  (no commands to memorize)
+  1) 🗺️  Map a site's attack surface   — pages, params, forms, APIs, backends, routes
+  2) 🌐  Find subdomains               — wildcard *.domain scope, passive OSINT
+  3) ⚔️  Attack a site                 — auto console — then pick the attack type
+  4) 🧙  ffuf wizard                   — menu-driven ffuf (checks it's installed)
+  5) 📖  Show the full command help
+choice [1-5]:
+```
+
+**Just want to see a site's surface and save time?** Pick **1**, paste the URL —
+it prints every page, parameter, form, API endpoint, backend, and hidden route
+it can find, and stops there. No attack, no wordlist, nothing to remember.
+
+Prefer typing? Every menu item is also a one-liner:
+
+```bash
+phantomfuzz auto -u https://target.com --discover-only   # 1) map the surface
+phantomfuzz subs -u target.com --probe                   # 2) find live subdomains
+phantomfuzz auto -u https://target.com                   # 3) attack (asks the mode)
+phantomfuzz ffuf                                          # 4) ffuf wizard
+```
+
+📖 New here? **[INSTALL.md](INSTALL.md)** (Kali/Debian setup) ·
+**[USAGE.md](USAGE.md)** (every command explained).
 
 ---
 
