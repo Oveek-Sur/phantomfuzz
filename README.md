@@ -30,10 +30,17 @@ auto-calibration, rich matchers/filters, and multiple export formats.
 | 🕵️ **Proxy support** | route through Burp/ZAP (`--proxy`) |
 | 💾 **Export** | JSON, CSV, HTML report, or plain text |
 | 📊 **Live UI** | colored results + progress bar, ETA, req/s |
-| 🤖 **Autopilot (`auto`)** | one command: crawl → show the surface → auto-test every param (traversal/XSS/SQLi/redirect), no wordlist needed |
+| 🤖 **Attack console (`auto`)** | one command: crawl → show the surface → attack it. Pick a mode (traversal/lfi/sqli/xss/redirect/ssrf) or **context** (auto-picks per param) or **all**. No wordlist needed |
+| 🧠 **Context payload selection** | reads each param's name and fires the *right* attack (`file=`→traversal, `id=`→sqli, `return_url=`→redirect, `q=`→xss) |
+| 🧾 **Form fuzzing** | crawler finds `<form>` inputs; the console fuzzes **POST body** fields too, not just URL query params |
+| 🥷 **WAF evasion (`--evade`)** | adaptive back-off, User-Agent rotation, jitter, rate cap, **and payload-encoding retries** that slip a blocked payload past signature filters |
+| 📡 **Live observability (`-v`)** | streams **every request** (status/latency/OK·WAF-BLOCK·429·TIMEOUT) + a plain-language diagnosis (*"WAF blocking — 34/40 recent 403; backed off 2s"*) so a stall is never a mystery |
+| 🛡️ **Scope gate** | never sends payloads off-scope — discovered third-party/SSO/CDN hosts are shown but not attacked (`--scope`, `--allow-offsite`) |
+| ✏️ **Editable payloads** | curated `attacks/*.txt` per category — add a line, no code (`payloads --local`) |
 | 🕷️ **Crawler/spider** | auto-discovers URLs, forms & parameters — no Burp needed |
 | 🌐 **Subdomain enum (`subs`)** | passive OSINT (crt.sh, certspotter, hackertarget) maps `*.domain` wildcard scopes — no amass/subfinder needed |
 | 🧠 **JS-bundle intel** | mines SPA JS for hidden routes, API endpoints, backends (Supabase/Firebase/S3) & leaked keys — no headless browser |
+| ⚡ **Fast async engine** | uvloop + worker-pool + lazy parsing — ~parity with ffuf under real network latency (see benchmark) |
 | 🎁 **PayloadsAllTheThings** | 66 payload categories built in (`-w patt:xss`) |
 
 ### 🚀 Beyond ffuf — the five limitations, solved
@@ -47,10 +54,28 @@ tackles each:
 | **2** | Stateless; you paste cookies by hand | **`--auth-url`** — runs the login flow, auto-extracts CSRF, captures session cookies & bearer tokens, reuses them |
 | **3** | Blind to JS/SPA (React/Vue) routes | **`--render-discover` / `--render-seed`** — headless browser renders the app and captures real API endpoints + in-app routes |
 | **4** | False positives from soft-404 / branded error pages | **`--smart`** — learns a baseline and filters responses by *content similarity*, not just status/size |
-| **5** | Trips WAFs / rate-limiters instantly | **`--adaptive --jitter --random-agent`** — detects blocking, auto-backs-off, jitters timing, rotates User-Agents |
+| **5** | Trips WAFs / rate-limiters instantly | **`auto --evade`** — detects blocking, auto-backs-off, jitters, rotates User-Agents, **and retries blocked payloads with WAF-bypass encodings**; `-v` streams a live diagnosis of *why* it's throttling |
 | **7** | Blind to business-logic bugs (IDOR, price/param tampering, race conditions) | **`idor` / `tamper` / `race` subcommands** — differential analyzers that compare responses against a baseline to surface logic flaws automatically |
 | **+** | You needed Burp to *find* URLs/params first | **`crawl` subcommand** — built-in spider maps the site (links, forms, params); `--tamper` auto-tests every param'd URL it finds |
 | **+** | You had to hunt for attack payloads | **`payloads` subcommand + `patt:` wordlists** — bundles [PayloadsAllTheThings](https://github.com/swisskyrepo/PayloadsAllTheThings) (66 categories) as instant wordlists |
+
+### 📊 Honest benchmark vs ffuf
+
+Measured on a 4-core VM, 10k-word list, same target. ffuf (Go) is the raw-speed
+king and this doesn't pretend otherwise:
+
+| Condition | ffuf | PhantomFuzz | Notes |
+|-----------|------|-------------|-------|
+| **localhost, 0 ms latency** | ~13,200 req/s | ~7,000 req/s | ffuf ~1.9× faster — pure CPU throughput, Go beats Python |
+| **30 ms latency (real target)** | ~5,700 req/s | ~5,100 req/s | **~90% of ffuf** — network RTT dominates, so the gap nearly vanishes |
+| **behind a WAF** | throttled | throttled | tool-agnostic — a WAF blocks *traffic*, not the binary; ffuf's speed can trip it *sooner* |
+
+**The honest verdict:** ffuf is faster and more battle-tested as a *pure fuzzer*,
+and for raw directory brute-forcing you should probably still use it. PhantomFuzz
+isn't trying to win a req/s contest — it's an **all-in-one recon→attack pipeline**:
+subdomains → crawl → JS-intel → context-aware attacks → WAF evasion → business-logic
+checks, from one binary, no wordlist required. Under real network latency the speed
+difference is small; the feature breadth is the point.
 
 ---
 

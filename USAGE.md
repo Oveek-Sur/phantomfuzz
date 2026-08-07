@@ -8,7 +8,7 @@ runs business-logic checks (IDOR / tamper / race) — all from one CLI.
 
 ---
 
-## 0. The one command to start with — `auto` (autopilot)
+## 0. The one command to start with — `auto` (attack console)
 
 If you don't want to think about anything, run this:
 
@@ -18,37 +18,58 @@ python -m phantomfuzz auto -u https://target.com
 
 It does the whole flow for you:
 
-1. **Discovers** the attack surface — crawls the site, mines the SPA JavaScript
-   bundles for hidden routes / API endpoints / backends, and (optionally) drives
-   a headless browser.
-2. **Shows you** everything it found — pages, parameterised URLs, API
-   endpoints, backend hosts (Supabase/Firebase/S3), client-side routes, and any
-   leaked keys.
-3. **Tests automatically** — with **no wordlist needed**, it probes every
-   parameterised endpoint with a default battery:
-   **path traversal · reflected XSS · error-based SQLi · open redirect**,
-   filtering false positives, and prints the findings.
+1. **Discovers** the attack surface — crawls the site (links **and `<form>`
+   inputs**), mines the SPA JavaScript bundles for hidden routes / API endpoints
+   / backends, and (optionally) drives a headless browser.
+2. **Shows you** everything it found — pages, parameterised URLs, forms, API
+   endpoints, backends, routes, leaked keys — and asks which attack to run.
+3. **Attacks** — with **no wordlist needed**, it fires the right payloads at
+   every in-scope param **and form field**, filters false positives, and prints
+   a final result.
 
-Useful variants:
+### Pick an attack mode (`-a`, or the interactive menu)
+
+| `-a` value | what it does |
+|------------|--------------|
+| `traversal` / `lfi` | 📁 read local files (`/etc/passwd`, PHP wrappers) |
+| `sqli` | 💉 error / boolean / time-based SQL injection |
+| `xss` | 🔥 un-escaped reflected XSS |
+| `redirect` / `ssrf` | ↪️ off-site redirects / internal-metadata reach |
+| `context` *(default)* | 🧠 auto-pick the right attack **per parameter** by its name |
+| `all` | 💥 run every attack, one by one |
+
+Payloads live in editable `attacks/*.txt` — add a line, no code
+(`python -m phantomfuzz payloads --local` to count them).
+
+### Useful variants
 
 ```bash
-# Just map the surface, don't attack (recon only)
+# recon only — map the surface, don't attack
 python -m phantomfuzz auto -u https://target.com --discover-only
 
-# Don't pause between "show" and "test"
-python -m phantomfuzz auto -u https://target.com --yes
+# choose the attack + skip the confirm pause
+python -m phantomfuzz auto -u https://target.com -a all --yes
 
-# Use a headless browser during discovery (needs Playwright, see §7)
-python -m phantomfuzz auto -u https://target.com --render
+# WAF evasion: back-off + UA rotation + jitter + payload-encoding retries
+python -m phantomfuzz auto -u https://target.com --evade
 
-# Instead of the default battery, fuzz the found endpoints with YOUR list
+# LIVE: stream every request + a "why is it stuck" diagnosis
+python -m phantomfuzz auto -u https://target.com -v
+
+# keep tests inside a wildcard scope (off-scope hosts shown, never attacked)
+python -m phantomfuzz auto -u https://app.target.com --scope target.com
+
+# use YOUR wordlist instead of the built-in battery
 python -m phantomfuzz auto -u https://target.com -w patt:xss
-python -m phantomfuzz auto -u https://target.com -w my_payloads.txt
 
-# Authenticated autopilot
+# authenticated
 python -m phantomfuzz auto -u https://target.com \
     --auth-url https://target.com/login --auth-data 'user=me&pass=pw'
 ```
+
+> ⚖️ **Authorized targets only.** The scope gate keeps payloads on your target's
+> registrable domain; `--allow-offsite` disables it — use only if your program
+> authorizes those hosts.
 
 Everything below is what `auto` orchestrates — reach for the individual
 commands when you want precise control.
