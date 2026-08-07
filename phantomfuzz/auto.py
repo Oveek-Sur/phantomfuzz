@@ -254,3 +254,80 @@ async def test_targets(targets, cookies=None, headers=None, verify_ssl=False,
         jobs = [one(url, k) for url, names in targets for k in names]
         await asyncio.gather(*jobs)
     return findings
+
+
+# --------------------------------------------------------------------------- #
+#  3. interactive attack console (mode-select + live heartbeat)
+# --------------------------------------------------------------------------- #
+
+async def attack_targets(targets, choice="context", cookies=None, headers=None,
+                         verify_ssl=False, timeout=15, concurrency=10,
+                         on_status=None, status_interval=3.0):
+    """Fire the chosen attack category(ies) at every param, with a heartbeat.
+
+    `choice` is one of attacklib.CATEGORIES, or "context" (pick per param) or
+    "all" (run every category). For each (url, param, category) it walks that
+    category's payloads and stops at the first confirmed hit. Every
+    `status_interval` seconds it calls on_status(status_dict) so the CLI can
+    show what it's doing. Returns findings: (url, key, cat, payload, resp, why).
+    """
+    from . import attacklib
+    findings = []
+    jobs = []
+    for url, names in targets:
+        for key in names:
+            for cat in attacklib.select_categories(choice, key):
+                jobs.append((url, key, cat))
+    if not jobs:
+        return findings
+
+    status = {"done": 0, "total": len(jobs), "findings": 0,
+              "cur": "starting…", "bycat": {}}
+    sem = asyncio.Semaphore(concurrency)
+    baselines = {}
+    baseline_locks = {}
+    stop = asyncio.Event()
+
+    async with await _mk_session(cookies, headers, verify_ssl, timeout) as s:
+        async def baseline_for(url, key):
+            bk = (url, key)
+            if bk not in baselines:
+                lk = baseline_locks.setdefault(bk, asyncio.Lock())
+                async with lk:
+                    if bk not in baselines:
+                        baselines[bk] = await _get(s, _set_param(url, key, "1"))
+            return baselines[bk]
+
+        async def do(url, key, cat):
+            async with sem:
+                base = await baseline_for(url, key)
+                host = urlsplit(url).netloc
+                status["cur"] = (f"{attacklib.EMOJI.get(cat, '')} {cat} "
+                                 f"-> {host} ?{key}")
+                for pl in attacklib.load(cat):
+                    r = await _get(s, _set_param(url, key, pl))
+                    hit, why = attacklib.detect(cat, pl, r, base)
+                    if hit:
+                        findings.append((url, key, cat, pl, r, why))
+                        status["findings"] += 1
+                        status["bycat"][cat] = status["bycat"].get(cat, 0) + 1
+                        break
+            status["done"] += 1
+
+        async def heartbeat():
+            while not stop.is_set():
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=status_interval)
+                except asyncio.TimeoutError:
+                    if on_status:
+                        on_status(dict(status))
+
+        hb = asyncio.create_task(heartbeat())
+        try:
+            await asyncio.gather(*(do(u, k, c) for u, k, c in jobs))
+        finally:
+            stop.set()
+            await hb
+        if on_status:
+            on_status(dict(status))          # final tick
+    return findings

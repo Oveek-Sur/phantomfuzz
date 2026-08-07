@@ -287,6 +287,8 @@ def build_parser():
     pl.add_argument("--export", nargs=2, metavar=("TERM", "FILE"),
                     help="write a category's payloads to FILE")
     pl.add_argument("--update", action="store_true", help="clone/pull the repo")
+    pl.add_argument("--local", action="store_true",
+                    help="count the editable attacks/ library used by 'auto'")
     pl.add_argument("--limit", type=int, default=0, help="cap payload count")
     pl.add_argument("--no-color", action="store_true")
 
@@ -312,6 +314,11 @@ def build_parser():
     au.add_argument("-o", "--output", metavar="FILE", help="write discovered URLs")
     au.add_argument("--yes", action="store_true",
                     help="don't pause between discovery and testing")
+    au.add_argument("-a", "--attack", metavar="MODE",
+                    choices=["traversal", "lfi", "sqli", "xss", "redirect",
+                             "ssrf", "context", "all"],
+                    help="attack mode: traversal|lfi|sqli|xss|redirect|ssrf|"
+                         "context|all  (omit for an interactive menu)")
     au.add_argument("--scope", metavar="DOMAIN",
                     help="registrable domain to keep tests in-scope "
                          "(default: derived from -u). Off-scope discovered "
@@ -740,6 +747,64 @@ def _run_crawl(args):
     return 0
 
 
+_ATTACK_MENU = [
+    ("traversal", "📁", "Path Traversal  — read local files (/etc/passwd)"),
+    ("lfi",       "📁", "Local File Inclusion — file read / PHP wrappers"),
+    ("sqli",      "💉", "SQL Injection  — error / boolean / time-based (+IDOR hints)"),
+    ("xss",       "🔥", "Reflected XSS  — un-escaped payload reflection"),
+    ("redirect",  "↪️", "Open Redirect  — off-site Location redirects"),
+    ("ssrf",      "🌐", "SSRF           — internal / cloud-metadata reach"),
+    ("context",   "🧠", "Auto (context) — pick the right attack per parameter"),
+    ("all",       "💥", "ALL            — run every attack, one by one"),
+]
+
+
+def _attack_menu():
+    """Interactive attack-mode picker (used when -a isn't given on a TTY)."""
+    print(f"\n{C.BOLD}Select attack mode:{C.RESET}")
+    for i, (key, emo, desc) in enumerate(_ATTACK_MENU, 1):
+        print(f"  {C.CYAN}{i}{C.RESET}) {emo}  {C.BOLD}{key:<9}{C.RESET} "
+              f"{C.DIM}{desc}{C.RESET}")
+    while True:
+        try:
+            raw = input(f"{C.BOLD}choice [1-8, default 7=context]:{C.RESET} ").strip()
+        except (KeyboardInterrupt, EOFError):
+            return None
+        if not raw:
+            return "context"
+        if raw.isdigit() and 1 <= int(raw) <= len(_ATTACK_MENU):
+            return _ATTACK_MENU[int(raw) - 1][0]
+        if raw.lower() in {k for k, _, _ in _ATTACK_MENU}:
+            return raw.lower()
+        print(f"  {C.YELLOW}pick 1-8 or a name{C.RESET}")
+
+
+def _attack_banner(target, mode):
+    from . import attacklib
+    cnt = attacklib.counts()
+    if mode == "all":
+        cats = attacklib.CATEGORIES
+    elif mode == "context":
+        cats = attacklib.CATEGORIES         # any could be used per-param
+    else:
+        cats = [mode]
+    total = sum(cnt[c] for c in cats)
+    emo = {"all": "💥", "context": "🧠"}.get(
+        mode, attacklib.EMOJI.get(mode, "🎯"))
+    print(f"""{C.MAGENTA}
+   ╔═══════════════════════════════════════════════════════╗
+   ║   {C.BOLD}PhantomFuzz · Auto Attack Console{C.RESET}{C.MAGENTA}                   ║
+   ╚═══════════════════════════════════════════════════════╝{C.RESET}""")
+    print(f"   {C.DIM}target :{C.RESET} {C.CYAN}{target}{C.RESET}")
+    print(f"   {C.DIM}mode   :{C.RESET} {emo} {C.BOLD}{mode}{C.RESET}")
+    print(f"   {C.DIM}armed  :{C.RESET} {C.GREEN}{total}{C.RESET} payloads across "
+          f"{C.GREEN}{len(cats)}{C.RESET} categor{'y' if len(cats)==1 else 'ies'} "
+          f"{C.DIM}(edit: ./attacks/*.txt){C.RESET}")
+    for c in cats:
+        print(f"       {attacklib.EMOJI.get(c,'')} {C.BOLD}{c:<10}{C.RESET}"
+              f"{C.DIM}{cnt[c]:>4} payloads{C.RESET}")
+
+
 def _run_auto(args):
     if args.no_color:
         C.strip()
@@ -749,6 +814,19 @@ def _run_auto(args):
         print(f"{C.RED}error:{C.RESET} pip install aiohttp", file=sys.stderr)
         return 2
     cookies, headers = _resolve_auth(args)
+
+    # ---- 0. pick attack mode (flag, else interactive menu, else context) ----
+    mode = args.attack
+    if not mode and not args.discover_only and not args.wordlist:
+        if sys.stdin.isatty():
+            mode = _attack_menu()
+            if mode is None:
+                print("stopped.")
+                return 0
+        else:
+            mode = "context"
+    if mode:
+        _attack_banner(args.url, mode)
 
     # ---- 1. DISCOVER ----
     print(f"{C.BOLD}[1/3] Discovering attack surface on {args.url} …{C.RESET}")
@@ -828,39 +906,71 @@ def _run_auto(args):
               f"{args.url.rstrip('/')}/FUZZ -w wordlists/common.txt --smart")
         return 0
 
-    # ---- 3. TEST (default security battery) ----
+    # ---- 3. ATTACK (interactive console: chosen mode + live heartbeat) ----
     if not args.yes and sys.stdin.isatty():
         try:
-            input(f"\n{C.BOLD}[3/3] Press Enter to auto-test "
-                  f"{len(targets)} endpoint(s) (Ctrl-C to stop)…{C.RESET} ")
+            input(f"\n{C.BOLD}[3/3] Press Enter to launch {C.MAGENTA}{mode}{C.RESET}"
+                  f"{C.BOLD} on {len(targets)} endpoint(s) (Ctrl-C to stop)…{C.RESET} ")
         except (KeyboardInterrupt, EOFError):
             print("\nstopped.")
             return 0
-    print(f"\n{C.BOLD}[3/3] Auto-testing (traversal · XSS · SQLi · redirect)…{C.RESET}")
+    from . import attacklib
+    njobs = sum(len(attacklib.select_categories(mode, k))
+                for _, names in targets for k in names)
+    print(f"\n{C.BOLD}[3/3] Attacking{C.RESET} {C.DIM}(mode={mode}, "
+          f"{njobs} param×attack jobs — live status every 3s):{C.RESET}\n")
 
-    def prog(done, total):
-        print(f"\r  {C.CYAN}probing{C.RESET} {done}/{total} params", end="", flush=True)
+    def on_status(st):
+        pct = (st["done"] / st["total"] * 100) if st["total"] else 100
+        bar = int(24 * pct / 100)
+        print(f"  {C.CYAN}[{'█'*bar}{'░'*(24-bar)}]{C.RESET} {pct:5.1f}%  "
+              f"{st['done']}/{st['total']}  "
+              f"{C.GREEN}⚑{st['findings']}{C.RESET}  "
+              f"{C.DIM}now: {st['cur']}{C.RESET}")
 
-    findings = asyncio.run(auto.test_targets(
-        targets, cookies=cookies, headers=headers,
+    findings = asyncio.run(auto.attack_targets(
+        targets, choice=mode, cookies=cookies, headers=headers,
         verify_ssl=not args.insecure, timeout=args.timeout,
-        concurrency=args.threads, on_log=log, on_progress=prog))
-    print()
+        concurrency=args.threads, on_status=on_status, status_interval=3.0))
 
+    # ---- FINAL RESULT ----
+    print(f"\n{C.MAGENTA}{'═'*60}{C.RESET}")
+    print(f"{C.BOLD}  FINAL RESULT{C.RESET}  {C.DIM}mode={mode} · "
+          f"{len(targets)} endpoints · {njobs} attacks run{C.RESET}")
+    print(f"{C.MAGENTA}{'═'*60}{C.RESET}")
     if not findings:
-        print(f"\n{C.GREEN}No obvious vulnerabilities surfaced.{C.RESET} "
-              f"(good — or dig deeper with idor/tamper/race)")
+        print(f"  {C.GREEN}✓ No vulnerabilities confirmed.{C.RESET} "
+              f"{C.DIM}(clean — or dig deeper with idor/tamper/race){C.RESET}")
         return 0
 
-    print(f"\n{C.BOLD}{C.RED}⚠ {len(findings)} potential finding(s):{C.RESET}")
-    for url, kind, key, payload, r, why in findings:
-        print(f"  {C.RED}{kind}{C.RESET} @ {C.CYAN}{url.split('?')[0]}{C.RESET} "
-              f"param {C.BOLD}{key}{C.RESET}")
-        print(f"      payload: {C.DIM}{payload[:70]}{C.RESET}")
-        print(f"      [{r.status}] {r.size}b — {why}")
-    print(f"\n{C.DIM}Verify by hand before reporting. Logic bugs? "
-          f"try: phantomfuzz idor|tamper|race{C.RESET}")
+    bycat = {}
+    for f in findings:
+        bycat.setdefault(f[2], []).append(f)
+    print(f"  {C.RED}{C.BOLD}⚠ {len(findings)} finding(s):{C.RESET} " +
+          "  ".join(f"{attacklib.EMOJI.get(c,'')} {c}={len(v)}"
+                   for c, v in bycat.items()))
+    print()
+    for url, key, cat, payload, r, why in findings:
+        print(f"  {C.RED}{C.BOLD}{attacklib.EMOJI.get(cat,'')} {cat.upper()}{C.RESET} "
+              f"@ {C.CYAN}{url.split('?')[0]}{C.RESET}  param {C.BOLD}{key}{C.RESET}")
+        print(f"      payload : {C.DIM}{payload[:72]}{C.RESET}")
+        print(f"      proof   : [{r.status}] {r.size}b — {C.YELLOW}{why}{C.RESET}")
+    if args.output:
+        _write_findings(findings, args.output)
+        print(f"\n  {C.GREEN}saved findings → {args.output}{C.RESET}")
+    print(f"\n  {C.DIM}Verify each by hand before reporting (never submit raw "
+          f"scanner output).{C.RESET}")
     return 0
+
+
+def _write_findings(findings, path):
+    import json
+    rows = [{"url": u.split("?")[0], "param": k, "attack": c,
+             "payload": p, "status": r.status, "size": r.size, "why": w}
+            for u, k, c, p, r, w in findings]
+    base = path.rsplit(".", 1)[0]
+    with open(base + ".json", "w", encoding="utf-8") as fh:
+        json.dump(rows, fh, indent=2, ensure_ascii=False)
 
 
 def _auto_fuzz_with_wordlist(args, targets, cookies, headers):
@@ -921,6 +1031,18 @@ def _run_payloads(args):
     if args.no_color:
         C.strip()
     from . import payloads
+    if getattr(args, "local", False):
+        from . import attacklib
+        cnt = attacklib.counts()
+        print(f"{C.BOLD}Editable attack library{C.RESET} "
+              f"{C.DIM}({attacklib.ATTACKS_DIR}){C.RESET}")
+        for c in attacklib.CATEGORIES:
+            print(f"  {attacklib.EMOJI.get(c,'')} {C.BOLD}{c:<10}{C.RESET}"
+                  f"{C.GREEN}{cnt[c]:>4}{C.RESET} payloads  "
+                  f"{C.DIM}attacks/{c}.txt{C.RESET}")
+        print(f"  {C.DIM}total {sum(cnt.values())} payloads · "
+              f"add lines to any file to extend.{C.RESET}")
+        return 0
     if args.update:
         return 0 if payloads.update() else 1
     if args.list:
@@ -1025,6 +1147,12 @@ def _run_net(args):
 
 
 def run(argv=None):
+    # keep emoji/unicode banners from crashing a cp1252 Windows console
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     # swap in uvloop early (before any asyncio.run) for a big throughput win
     try:
         from .http_client import install_fast_loop

