@@ -80,6 +80,20 @@ def detect_cdn(url):
     return None
 
 
+def detect_wildcard(url):
+    """True if a made-up path still returns 200 — the site serves a catch-all
+    page (SPA / wildcard routing), so directory brute-forcing is pointless
+    (every word 'exists'). Detected up front so we don't waste the user's time."""
+    base = url.rstrip("/") + "/phantom_nope_zx9q7k_does_not_exist"
+    try:
+        req = urllib.request.Request(base, headers={"User-Agent": REAL_UA})
+        return urllib.request.urlopen(req, timeout=10).status == 200
+    except urllib.error.HTTPError:
+        return False          # 404/403 → normal server, brute-forcing works
+    except Exception:  # noqa: BLE001
+        return False
+
+
 # --------------------------------------------------------------------------- #
 #  wordlist handling
 # --------------------------------------------------------------------------- #
@@ -127,14 +141,14 @@ def build_ffuf_cmd(task, target, wordlist, rate=0, threads=40, delay=None,
 
     if task == "dir":
         url = target.rstrip("/") + "/FUZZ"
-        cmd += ["-u", url]
+        cmd += ["-u", url, "-ac"]          # auto-calibrate → filter wildcard/SPA 200s
     elif task == "ext":
         url = target.rstrip("/") + "/FUZZ"
-        cmd += ["-u", url, "-e", extensions or ".php,.bak,.old,.txt,.zip"]
+        cmd += ["-u", url, "-e", extensions or ".php,.bak,.old,.txt,.zip", "-ac"]
     elif task == "param":
         # target already contains FUZZ, else append ?FUZZ=1 style
         url = target if "FUZZ" in target else target.rstrip("/") + "?FUZZ=1"
-        cmd += ["-u", url]
+        cmd += ["-u", url, "-ac"]
     elif task == "vhost":
         base = target if target.startswith("http") else "https://" + target
         dom = vhost_domain or _bare_host(target)
@@ -234,6 +248,20 @@ def run_wizard():
                 return 0
         else:
             print(f"{C.GREEN}No obvious CDN/WAF proxy detected — good to go.{C.RESET}")
+
+        # 3b) SPA / catch-all check — directory brute-forcing is useless when
+        #     every path returns the same page
+        if task in ("dir", "ext") and detect_wildcard(target):
+            print(f"{C.YELLOW}{C.BOLD}⚠ This target returns a page for EVERY "
+                  f"path (SPA / catch-all routing).{C.RESET}")
+            print(f"  {C.DIM}Directory/file brute-forcing will show every word "
+                  f"as '200' — there's no real server-side file structure to "
+                  f"find. (-ac will filter the noise, but expect ~no results.) "
+                  f"ffuf shines on server-rendered sites; a static SPA like this "
+                  f"isn't one.{C.RESET}")
+            if not _yes(f"{C.BOLD}Continue anyway?{C.RESET}", default=False):
+                print("Aborted — smart move.")
+                return 0
 
         # 4) extensions / vhost specifics
         extensions = vhost_domain = None
