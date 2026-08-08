@@ -937,9 +937,14 @@ def _run_auto(args):
         return _auto_fuzz_with_wordlist(args, targets, cookies, headers)
 
     if not atk_targets:
-        print(f"\n{C.YELLOW}No parameterised endpoints to auto-test.{C.RESET} "
-              f"Try --render, or fuzz a route with: phantomfuzz web -u "
-              f"{args.url.rstrip('/')}/FUZZ -w wordlists/common.txt --smart")
+        print(f"\n{C.YELLOW}Nothing to attack — this target exposes no query "
+              f"parameters or form inputs.{C.RESET}")
+        print(f"  {C.DIM}Traversal / SQLi / XSS / redirect / SSRF all need an "
+              f"input to inject into; a static site or SPA like this has none "
+              f"in its HTML (its real surface is the API/JS backend above).{C.RESET}")
+        print(f"  {C.DIM}Try a target that has params, or brute routes with: "
+              f"phantomfuzz web -u {args.url.rstrip('/')}/FUZZ "
+              f"-w wordlists/common.txt --smart{C.RESET}")
         return 0
 
     # ---- 3. ATTACK (interactive console: chosen mode + live heartbeat) ----
@@ -1004,11 +1009,33 @@ def _run_auto(args):
     print(f"{C.BOLD}  FINAL RESULT{C.RESET}  {C.DIM}mode={mode} · "
           f"{len(targets)} endpoints · {njobs} attacks run{C.RESET}")
     print(f"{C.MAGENTA}{'═'*60}{C.RESET}")
+
+    # per-category coverage verdict — is each attack type possible here?
+    tested = {}
+    for t in atk_targets:
+        for k in t["params"]:
+            for cat in attacklib.select_categories(mode, k):
+                tested[cat] = tested.get(cat, 0) + 1
+    found_ct = {}
+    for f in findings:
+        found_ct[f[2]] = found_ct.get(f[2], 0) + 1
+    print(f"  {C.BOLD}Coverage — what was tested & the verdict:{C.RESET}")
+    for cat in attacklib.CATEGORIES:
+        if not tested.get(cat):
+            continue
+        if found_ct.get(cat):
+            verdict = f"{C.RED}⚠ POSSIBLE — {found_ct[cat]} finding(s){C.RESET}"
+        else:
+            verdict = f"{C.GREEN}not vulnerable{C.RESET}"
+        print(f"    {attacklib.EMOJI.get(cat,'')} {cat:<10}"
+              f"{C.DIM}tested on {tested[cat]} param(s) · {C.RESET}{verdict}")
+
     if not findings:
-        print(f"  {C.GREEN}✓ No vulnerabilities confirmed.{C.RESET} "
+        print(f"\n  {C.GREEN}✓ No vulnerabilities confirmed.{C.RESET} "
               f"{C.DIM}(clean — or dig deeper with idor/tamper/race){C.RESET}")
         return 0
 
+    print()
     bycat = {}
     for f in findings:
         bycat.setdefault(f[2], []).append(f)
