@@ -234,20 +234,25 @@ def run_wizard():
         # 3) CDN / Cloudflare check — fail fast, don't waste the user's time
         print(f"{C.DIM}Checking the target's edge…{C.RESET}")
         cdn = detect_cdn(target)
+        auto_pace = False
         if cdn:
-            print(f"{C.YELLOW}{C.BOLD}⚠ Heads up: this target is behind "
-                  f"{cdn}.{C.RESET}")
-            print(f"  {C.DIM}Your requests hit {cdn}'s proxy/WAF edge, not the "
-                  f"origin server. Directory/param fuzzing here mostly returns "
-                  f"edge responses (and can get you rate-limited/blocked fast) "
-                  f"— it will likely waste your time.{C.RESET}")
-            print(f"  {C.DIM}Better: find the origin IP, test an in-scope host "
-                  f"that isn't proxied, or use --evade-style pacing.{C.RESET}")
-            if not _yes(f"{C.BOLD}Continue anyway?{C.RESET}", default=False):
-                print("Aborted — smart move.")
+            print(f"{C.CYAN}{C.BOLD}ℹ This target is behind {cdn}.{C.RESET} "
+                  f"{C.DIM}(normal — most sites are today){C.RESET}")
+            print(f"  {C.DIM}{cdn} is a reverse proxy, so your path/directory "
+                  f"requests still reach the origin app through it — fuzzing is "
+                  f"NOT wasted. What {cdn} does: its WAF may 403 obvious attack "
+                  f"payloads, and it'll rate-limit you if you go too fast.{C.RESET}")
+            print(f"  {C.GREEN}→ Enabling WAF-safe pacing{C.RESET} "
+                  f"{C.DIM}(rate cap + random delay + real User-Agent). For "
+                  f"attack-payload fuzzing, the auto console's --evade also "
+                  f"retries blocked payloads with encodings.{C.RESET}")
+            auto_pace = True
+            if not _yes(f"{C.BOLD}Continue with WAF-safe pacing?{C.RESET}",
+                        default=True):
+                print("Okay, stopping here.")
                 return 0
         else:
-            print(f"{C.GREEN}No obvious CDN/WAF proxy detected — good to go.{C.RESET}")
+            print(f"{C.GREEN}No CDN/WAF proxy detected — good to go.{C.RESET}")
 
         # 3b) SPA / catch-all check — directory brute-forcing is useless when
         #     every path returns the same page
@@ -307,17 +312,19 @@ def run_wizard():
                           f"{C.DIM}(default 40){C.RESET}: ", "40")
         threads = int(threads_in) if threads_in.isdigit() else 40
 
-        # 7) firewall / WAF bypass
+        # 7) firewall / WAF bypass (auto-on when a CDN/WAF was detected)
         delay = None
         random_ua = False
-        if _yes(f"{C.BOLD}Enable firewall/WAF-bypass pacing?{C.RESET} "
-                f"{C.DIM}(real UA + random delay){C.RESET}", default=False):
+        pace = auto_pace or _yes(
+            f"{C.BOLD}Enable firewall/WAF-bypass pacing?{C.RESET} "
+            f"{C.DIM}(real UA + random delay){C.RESET}", default=False)
+        if pace:
             random_ua = True
             delay = "0.1-0.5"
             if not rate:
                 rate = 30
-            print(f"  {C.DIM}Applied: realistic User-Agent, 0.1–0.5s random "
-                  f"delay, rate capped at {rate}/s.{C.RESET}")
+            print(f"  {C.DIM}WAF-safe pacing on: realistic User-Agent, 0.1–0.5s "
+                  f"random delay, rate ≤ {rate}/s.{C.RESET}")
 
         # 8) build + confirm + run
         cmd = build_ffuf_cmd(task, target, adapted, rate=rate, threads=threads,
