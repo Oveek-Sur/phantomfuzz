@@ -665,6 +665,7 @@ def _run_crawl(args):
     from .crawl import Crawler, merge_rendered, merge_js_intel
     show(__version__)
     cookies, headers = _resolve_auth(args)
+    args.url = _normalize_target(args.url)   # bare host -> https://host
     crawler = Crawler(
         args.url, max_depth=args.depth, max_pages=args.max,
         concurrency=args.threads, timeout=args.timeout,
@@ -823,6 +824,14 @@ def _attack_banner(target, mode):
               f"{C.DIM}{cnt[c]:>4} payloads{C.RESET}")
 
 
+def _normalize_target(u):
+    """Accept a bare host (example.com) — default the scheme to https://."""
+    u = (u or "").strip()
+    if u and not u.startswith(("http://", "https://")):
+        u = "https://" + u
+    return u
+
+
 def _run_auto(args):
     if args.no_color:
         C.strip()
@@ -832,6 +841,7 @@ def _run_auto(args):
         print(f"{C.RED}error:{C.RESET} pip install aiohttp", file=sys.stderr)
         return 2
     cookies, headers = _resolve_auth(args)
+    args.url = _normalize_target(args.url)   # bare host -> https://host
 
     # ---- 0. pick attack mode (flag, else interactive menu, else context) ----
     mode = args.attack
